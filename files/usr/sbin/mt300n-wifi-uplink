@@ -14,8 +14,12 @@
 # wired WAN zone membership, so the device goes back to WAN-over-Ethernet.
 
 SECTION="mt300n_sta"
-IFACE="wwan"
-NET="mt300n_wwan"
+
+# The netifd interface name MUST match the wifi-iface's `network` option, that
+# is how netifd binds the station device to an interface. Everything else
+# (firewall zone membership, ifstatus lookups) uses the same name.
+NET="wwan"
+
 WAN_ZONE_DEFAULT="wan wan6"
 
 log() { logger -t mt300n-wifi "$*"; echo "$*"; }
@@ -34,7 +38,7 @@ wifi_reload() {
 	wifi reload >/dev/null 2>&1 || wifi up >/dev/null 2>&1 || true
 }
 
-# Remove $IFACE from a zone's network list without disturbing the other members.
+# Remove $NET from a zone's network list without disturbing other members.
 zone_del() {
 	_zn="$1"; _want="$2"
 	_list="$(uci -q get "firewall.$_zn.network" 2>/dev/null)"
@@ -62,25 +66,24 @@ zone_add() {
 cleanup() {
 	_zn="$(find_wan_zone)"
 
-	# Drop the temporary interface config.
-	while uci -q delete "network.$NET"; do :; done
 	while uci -q delete "wireless.$SECTION"; do :; done
+	while uci -q delete "network.$NET"; do :; done
 
 	if [ -n "$_zn" ]; then
-		zone_del "$_zn" "$IFACE"
-		# Make sure the wired WAN stays in the zone even if we created the
-		# zone entry ourselves earlier.
+		zone_del "$_zn" "$NET"
 		for _w in $WAN_ZONE_DEFAULT; do
 			zone_add "$_zn" "$_w"
 		done
 	fi
 
-	# Remove the now-unused network stanzas.
-	while uci -q delete "network.$IFACE"; do :; done
-
 	uci -q commit network 2>/dev/null || true
 	uci -q commit wireless 2>/dev/null || true
 	uci -q commit firewall 2>/dev/null || true
+}
+
+# uci network interface name -> first IPv4 address, via netifd's own status
+iface_addr() {
+	ifstatus "$1" 2>/dev/null | sed -n 's/.*"address": "\([0-9.]*\)".*/\1/p' | head -1
 }
 
 case "$1" in
@@ -99,7 +102,11 @@ on)
 	uci -q set "wireless.$SECTION.device=$RADIO"
 	uci -q set "wireless.$SECTION.mode=sta"
 	uci -q set "wireless.$SECTION.ssid=$SSID"
-	uci -q set "wireless.$SECTION.network=$IFACE"
+	uci -q set "wireless.$SECTION.network=$NET"
+	# Pin the created interface name. Without this the kernel device is named
+	# phy0-sta0 and netifd cannot bind it to the interface (NO_DEVICE), so the
+	# station associates but never gets a DHCP lease.
+	uci -q set "wireless.$SECTION.ifname=$NET"
 	if [ -n "$KEY" ]; then
 		uci -q set "wireless.$SECTION.encryption=psk2"
 		uci -q set "wireless.$SECTION.key=$KEY"
@@ -113,7 +120,7 @@ on)
 	_zn="$(find_wan_zone)"
 	[ -n "$_zn" ] || _zn="@zone[1]"
 	uci -q set "firewall.$_zn.name=wan"
-	zone_add "$_zn" "$IFACE"
+	zone_add "$_zn" "$NET"
 
 	uci -q commit wireless
 	uci -q commit network
@@ -124,17 +131,17 @@ on)
 
 	i=0
 	while [ "$i" -lt 40 ]; do
-		if ip -4 addr show "$IFACE" 2>/dev/null | grep -q 'inet '; then
-			ADDR="$(ip -4 addr show "$IFACE" | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)"
-			log "uplink up: $IFACE has $ADDR"
+		ADDR="$(iface_addr "$NET")"
+		if [ -n "$ADDR" ]; then
+			log "uplink up: $NET has $ADDR"
 			exit 0
 		fi
 		i=$((i + 1))
 		sleep 3
 	done
 
-	log "ERROR: no DHCP lease on $IFACE after 120s"
-	iwinfo "$IFACE" info 2>&1 | head -5 | while read -r l; do log "  $l"; done
+	log "ERROR: no DHCP lease on $NET after 120s"
+	log "state: $(ifstatus $NET 2>&1 | tr -d '\n' | cut -c1-300)"
 	exit 1
 	;;
 

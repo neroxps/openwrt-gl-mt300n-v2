@@ -40,12 +40,24 @@ log "tmpfs free: $((AVAIL / 1024)) MB"
 # stored twice in RAM.
 fetch_stream() {
 	ASSET="$1"
-	for URL in \
+
+	# Ordered list of sources. NOTE: GitHub's /releases/latest/download/ URL
+	# answers with a 302 and the OpenWrt downloaders do not follow redirects, so
+	# it is only a fallback. The raw branch URL is stable and always a plain
+	# 200 through the proxy, which is why CI publishes the payload there.
+	set -- \
+		"${PROXY}/https://raw.githubusercontent.com/${REPO}/payload/${ASSET}" \
+		"https://raw.githubusercontent.com/${REPO}/payload/${ASSET}" \
 		"${PROXY}/https://github.com/${REPO}/releases/latest/download/${ASSET}" \
-		"https://github.com/${REPO}/releases/latest/download/${ASSET}" \
-		"${PROXY}/https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
-	do
-		[ -z "$TAG" ] && case "$URL" in *"/download/${ASSET}") continue ;; esac
+		"https://github.com/${REPO}/releases/latest/download/${ASSET}"
+
+	if [ -n "$TAG" ]; then
+		set -- "$@" \
+			"${PROXY}/https://github.com/${REPO}/releases/download/${TAG}/${ASSET}" \
+			"https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
+	fi
+
+	for URL in "$@"; do
 		log "trying $URL"
 		if uclient-fetch -q -O - "$URL" 2>/dev/null | tar -xzf - -C "$DEST" 2>/dev/null; then
 			return 0

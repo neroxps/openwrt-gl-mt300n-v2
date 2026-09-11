@@ -118,6 +118,30 @@ jobs:
           du -sh /tmp/payloadcheck || true
           du -sb /tmp/payloadcheck || true
 
+      - name: Publish payload to the raw branch
+        run: |
+          set -eux
+          # The device pulls the payload through a GitHub proxy. Proxy URLs for
+          # /releases/latest/download/ answer 302 and the OpenWrt downloaders do
+          # not follow redirects, so publish the same tarball as a plain repo
+          # file on a dedicated `payload` branch - raw.githubusercontent.com
+          # always answers 200 through the proxy.
+          cd "$GITHUB_WORKSPACE"
+          rm -rf pub
+          mkdir pub
+          cp payload-mipsel_24kc.tar.gz payload.sha256 pub/
+          cp "$GITHUB_WORKSPACE/dist/MANIFEST.txt" pub/ 2>/dev/null || true
+          cd pub
+          git init -q -b payload
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          git add -A
+          git commit -q -m "payload build ${GITHUB_RUN_ID}"
+          git push -q --force \
+            "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${GITHUB_REPOSITORY}.git" \
+            payload
+          echo "published payload branch"
+
       - uses: actions/upload-artifact@v5
         with:
           name: payload
