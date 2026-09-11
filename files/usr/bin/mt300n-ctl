@@ -127,8 +127,14 @@ tailcat)
 		;;
 	genkey)
 		# Force a new saved key. The tailcat address changes.
+		# The key lives at an absolute path under /etc: procd runs services with
+		# HOME=/, so tailcat's own default key location would not survive a
+		# reboot and every boot would mint a new address.
+		export HOME=/root
 		KEYN="$(uci -q get tailcat.main.key_name)"; [ -n "$KEYN" ] || KEYN=default
 		REG="$(uci -q get tailcat.main.region)";   [ -n "$REG" ] || REG=auto
+		KEYFILE="/etc/tailcat/keys/$KEYN.private.json"
+		mkdir -p /etc/tailcat/keys; chmod 700 /etc/tailcat/keys 2>/dev/null
 		DM="$(uci -q get tailcat.main.derpmap_url)"
 		if [ -z "$DM" ]; then
 			DM="http://127.0.0.1/derpmap.json"
@@ -137,11 +143,11 @@ tailcat)
 		fi
 		pkill -f 'bin/tailcat' 2>/dev/null
 		sleep 1
-		rm -f "/root/.config/tailcat/keys/$KEYN.private.json"
+		rm -f "$KEYFILE"
 		if [ "$REG" = "auto" ]; then
-			"$BIN/tailcat" genkey "--key=$KEYN" "--derpmap-url=$DM" 2>&1 | tail -3
+			"$BIN/tailcat" genkey "--key=$KEYFILE" "--derpmap-url=$DM" 2>&1 | tail -3
 		else
-			"$BIN/tailcat" genkey "--key=$KEYN" "--region=$REG" --fixed-region "--derpmap-url=$DM" 2>&1 | tail -3
+			"$BIN/tailcat" genkey "--key=$KEYFILE" "--region=$REG" --fixed-region "--derpmap-url=$DM" 2>&1 | tail -3
 		fi
 		/etc/init.d/tailcat restart >/dev/null 2>&1
 		;;

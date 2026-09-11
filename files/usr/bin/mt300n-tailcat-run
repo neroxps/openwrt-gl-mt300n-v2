@@ -14,7 +14,14 @@
 BIN=/tmp/opt/bin/tailcat
 ADDR_DIR=/etc/tailcat
 ADDR_FILE=$ADDR_DIR/address
-KEYDIR=/root/.config/tailcat/keys
+
+# IMPORTANT: the saved key is addressed by an ABSOLUTE PATH.
+# procd runs services with HOME=/ (not /root), so tailcat's default key
+# location ($HOME/.config/tailcat/keys) would point at /.config/... and the
+# stable key generated interactively under /root would never be found - every
+# boot would silently mint a fresh address. An explicit path removes the
+# dependency on HOME entirely, and /etc survives a reboot.
+KEYDIR=$ADDR_DIR/keys
 
 # tailcat's built-in default (https://tailcat.dev/derpmap.json) is not
 # reachable from every network, so we prefer a copy served by the router
@@ -22,25 +29,27 @@ KEYDIR=/root/.config/tailcat/keys
 LOCAL_DERPMAP="http://127.0.0.1/derpmap.json"
 REMOTE_DERPMAP="https://ghfast.top/https://raw.githubusercontent.com/neroxps/openwrt-gl-mt300n-v2/payload/derpmap.json"
 
+export HOME=/root
+
 log() { logger -t tailcat "$*"; }
 
 config_load tailcat
 
-config_get      role      main role 'serve'
-config_get      preset    main preset 'ssh_web'
-config_get      custom    main custom_ports ''
-config_get      key_name  main key_name 'default'
-config_get      region    main region 'auto'
+config_get      role       main role 'serve'
+config_get      preset     main preset 'ssh_web'
+config_get      custom     main custom_ports ''
+config_get      key_name   main key_name 'default'
+config_get      region     main region 'auto'
 config_get      key_region main key_region ''
-config_get      allow     main allow ''
-config_get      sshkeys   main ssh_authorized_keys ''
-config_get      fileshare main files_share ''
-config_get      faddr     main forward_addr ''
-config_get      fmap      main forward_map ''
-config_get      bind      main bind '127.0.0.1'
-config_get      dmurl     main derpmap_url ''
-config_get_bool verbose   main verbose 0
-config_get      extra     main extra_args ''
+config_get      allow      main allow ''
+config_get      sshkeys    main ssh_authorized_keys ''
+config_get      fileshare  main files_share ''
+config_get      faddr      main forward_addr ''
+config_get      fmap       main forward_map ''
+config_get      bind       main bind '127.0.0.1'
+config_get      dmurl      main derpmap_url ''
+config_get_bool verbose    main verbose 0
+config_get      extra      main extra_args ''
 
 [ -n "$key_name" ] || key_name=default
 [ -n "$region" ]   || region=auto
@@ -48,6 +57,7 @@ config_get      extra     main extra_args ''
 [ -x "$BIN" ] || { log "tailcat is not installed yet"; exit 1; }
 
 mkdir -p "$ADDR_DIR" "$KEYDIR"
+chmod 700 "$KEYDIR" 2>/dev/null
 
 # ---------------------------------------------------------------- DERP map --
 if [ -z "$dmurl" ]; then
@@ -81,16 +91,20 @@ if [ "$NEED_KEY" = "1" ]; then
 	_ok=0
 	for _dm in "$dmurl" "$LOCAL_DERPMAP" "$REMOTE_DERPMAP"; do
 		[ -n "$_dm" ] || continue
+		# skip a source we already tried
+		case " $_tried " in *" $_dm "*) continue ;; esac
+		_tried="$_tried $_dm"
+
 		rm -f "$KEYFILE"
-		set -- genkey "--key=$key_name" "--derpmap-url=$_dm"
+		set -- genkey "--key=$KEYFILE" "--derpmap-url=$_dm"
 		if [ "$region" != "auto" ]; then
 			set -- "$@" "--region=$region" --fixed-region
 		fi
-		if "$BIN" "$@" >/dev/null 2>&1 && [ -f "$KEYFILE" ]; then
+		if _out=$("$BIN" "$@" 2>&1) && [ -f "$KEYFILE" ]; then
 			_ok=1
 			break
 		fi
-		log "genkey failed against $_dm"
+		log "genkey failed against $_dm: $(echo "$_out" | tail -2 | tr '\n' ' ')"
 	done
 
 	if [ "$_ok" = "1" ]; then
@@ -129,10 +143,10 @@ set -- "$BIN"
 set -- "$@" "--derpmap-url=$dmurl"
 
 case "$role" in
-forwards|forward)
+forward)
 	[ -n "$faddr" ] || { log "role=forward but forward_addr is empty"; exit 2; }
 	[ -n "$fmap" ]  || { log "role=forward but forward_map is empty";  exit 2; }
-	set -- "$@" "--key=$key_name" forward "--bind=$bind" "$faddr"
+	set -- "$@" "--key=$KEYFILE" forward "--bind=$bind" "$faddr"
 	for m in $fmap; do
 		set -- "$@" "$m"
 	done
@@ -147,7 +161,7 @@ forwards|forward)
 	if [ -n "$fileshare" ]; then
 		set -- "$@" "--files=$fileshare"
 	fi
-	set -- "$@" "--key=$key_name" serve
+	set -- "$@" "--key=$KEYFILE" serve
 	for s in $(echo "$svc" | tr ',' ' '); do
 		set -- "$@" "$s"
 	done
