@@ -143,7 +143,12 @@ jobs:
           # OpenWrt's sha256sums uses the binary-mode marker: "<hash> *<file>"
           grep -F "*${IB}" sha256sums | sha256sum -c -
           tar --zstd -xf "$IB"
-          echo "IBDIR=$PWD/openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}" >> "$GITHUB_ENV"
+          # The top-level directory carries a .Linux-x86_64 suffix; derive it
+          # from the archive instead of guessing.
+          IBDIR="$PWD/$(tar --zstd -tf "$IB" | head -1 | cut -d/ -f1)"
+          [ -d "$IBDIR" ] || { echo "ERROR: ImageBuilder dir not found at $IBDIR"; ls -1; exit 1; }
+          echo "IBDIR=$IBDIR" >> "$GITHUB_ENV"
+          echo "ImageBuilder ready: $IBDIR"
 
       - name: Build image
         run: |
@@ -154,7 +159,9 @@ jobs:
           #   kmod-tun                                               -> tailscaled userspace
           #   ca-bundle                                              -> HTTPS for GitHub
           #   luci                                                   -> web UI
-          PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci"
+          #   zram-swap                                              -> headroom for the
+          #     46 MB payload that lives in tmpfs on a 128 MB box
+          PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci zram-swap"
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/files/." files/
           # Optional: bake an SSH public key so the flashed router is reachable

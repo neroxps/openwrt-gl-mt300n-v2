@@ -60,4 +60,9 @@ fi
 /etc/init.d/glstatus enable
 /etc/init.d/mt300n-payload enable
 
+# --- zram swap ---------------------------------------------------------------
+# The runtime payload lives in tmpfs on a 128 MB device; compressed swap keeps
+# the router comfortable while both tailscaled and frpc are resident.
+/etc/init.d/zram enable 2>/dev/null || true
+
 exit 0
