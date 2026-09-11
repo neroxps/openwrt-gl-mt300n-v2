@@ -36,19 +36,30 @@ die() {
 /usr/bin/glstate installing
 
 # ---------------------------------------------------------------- space ------
-# Reclaim the destination BEFORE checking free space.
+# Stop the services BEFORE touching the binaries.
 #
-# An interrupted transfer (link drop, power cut, service restart) leaves a
-# half-written binary behind. Those leftovers are unusable but still occupy
-# tmpfs, so without this cleanup a single failed download permanently wedges
-# the installer: every later attempt reports "not enough tmpfs space" and the
-# router never recovers. Everything here is re-fetched on every boot anyway.
+# tmpfs keeps a deleted file alive as long as some process still has it open.
+# Replacing tailcat/frpc while they are running therefore leaks their whole
+# size - the old inode is unlinked but its pages stay charged to tmpfs, and
+# neither rm nor `du` can see or reclaim them. On a 60 MB tmpfs holding a 36 MB
+# payload that is fatal: the next install finds ~30 MB permanently missing and
+# fails forever. Stopping the services first releases the space.
+for svc in tailcat frpc; do
+	[ -x "/etc/init.d/$svc" ] && /etc/init.d/"$svc" stop >/dev/null 2>&1
+done
+pkill -f 'bin/tailcat' 2>/dev/null
+pkill -f 'bin/frpc'    2>/dev/null
+sleep 2
+
+# Reclaim the destination: an interrupted transfer leaves a half-written binary
+# behind, which is unusable but still occupies tmpfs. Everything here is
+# re-fetched on every boot anyway.
 rm -rf "$BIN" "$DEST/stg" "$DEST"/tmp.* 2>/dev/null
 mkdir -p "$BIN" "$RUN" "$VAR/lib/tailscale" "$DEST/etc"
 
 AVAIL=$(df -k /tmp | awk 'NR==2 {print $4}')
 log "tmpfs free: $((AVAIL / 1024)) MB"
-[ "$AVAIL" -gt 25000 ] || die "not enough tmpfs space (${AVAIL}kB free), need ~25MB"
+[ "$AVAIL" -gt 40000 ] || die "not enough tmpfs space (${AVAIL}kB free), need ~40MB"
 
 # ---------------------------------------------------------------- fetch ------
 download() {
@@ -86,29 +97,29 @@ fetch_asset() {
 	fi
 
 	# The matching .sha256, when the asset has one.
-	SHAURL="$(echo "$ASSET" | sed 's/\.tar\.gz$/.sha256/')"
 	for URL in "$@"; do
 		log "trying $URL"
 		rm -f "$ARC"
 		download "$URL" "$ARC" || continue
 
-		# Integrity check (best effort: only when a checksum is published).
+	# Integrity check (best effort: only when a published checksum exists).
+	WANT=""
+	for shaname in "${ASSET%.tar.gz}.sha256" payload.sha256 payload.tailscale.sha256; do
 		rm -f /tmp/.sha
-		if [ "$SHAURL" != "$ASSET" ]; then
-			BASE="$(echo "$URL" | sed "s|$ASSET\$|$SHAURL|")"
-			download "$BASE" /tmp/.sha 2>/dev/null
+		download "$(echo "$URL" | sed "s|$ASSET\$|$shaname|")" /tmp/.sha 2>/dev/null || continue
+		WANT="$(awk -v a="$ASSET" '{ n=$2; sub(/^\*/,"",n); if (n==a) { print $1; exit } }' /tmp/.sha)"
+		[ -n "$WANT" ] && break
+	done
+	if [ -n "$WANT" ]; then
+		GOT="$(sha256sum "$ARC" | cut -d' ' -f1)"
+		if [ "$WANT" != "$GOT" ]; then
+			log "sha256 mismatch for $ASSET ($WANT != $GOT) - trying next source"
+			rm -f "$ARC" /tmp/.sha
+			continue
 		fi
-		if [ -s /tmp/.sha ]; then
-			WANT="$(awk 'NR==1{print $1}' /tmp/.sha)"
-			GOT="$(sha256sum "$ARC" | cut -d' ' -f1)"
-			if [ -n "$WANT" ] && [ "$WANT" != "$GOT" ]; then
-				log "sha256 mismatch for $ASSET ($WANT != $GOT) - trying next source"
-				rm -f "$ARC" /tmp/.sha
-				continue
-			fi
-			log "sha256 ok for $ASSET"
-		fi
-		rm -f /tmp/.sha
+		log "sha256 ok for $ASSET"
+	fi
+	rm -f /tmp/.sha
 
 		rm -rf "$STG"
 		mkdir -p "$STG"
