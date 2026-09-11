@@ -22,7 +22,13 @@ READY=/tmp/.mt300n-ready
 ERR=/tmp/.mt300n-error
 
 log() { logger -t mt300n-payload "$*"; echo "[payload] $*"; }
-die() { log "FATAL: $*"; touch "$ERR"; rm -f "$FLAG"; /usr/bin/glstate error; exit 1; }
+die() {
+	log "FATAL: $*"
+	touch "$ERR"
+	rm -f "$FLAG" "$READY"
+	/usr/bin/glstate error
+	exit 1
+}
 
 [ -r "$PKGLIST" ] || die "package list $PKGLIST not readable"
 

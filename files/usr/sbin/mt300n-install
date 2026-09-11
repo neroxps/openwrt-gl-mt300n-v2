@@ -11,10 +11,10 @@
 REPO="${REPO:-neroxps/openwrt-gl-mt300n-v2}"
 PROXY="${PROXY:-https://ghfast.top}"
 REF="${REF:-main}"
-RAW="${PROXY}/https://raw.githubusercontent.com/${REPO}/${REF}"
 
 WORK=/tmp/mt300n-install
 FLAG=/tmp/.mt300n-installing
+READY=/tmp/.mt300n-ready
 ERR=/tmp/.mt300n-error
 
 mkdir -p "$WORK"
@@ -24,12 +24,19 @@ rm -f "$ERR"
 
 log() { logger -t mt300n-install "$*"; echo "$*"; }
 
+# Cache buster.
+#
+# The GitHub proxies in front of raw.githubusercontent.com cache aggressively:
+# a file pushed a moment ago is still served from cache for a while, which
+# means a fix to install.sh itself would silently not take effect. A unique
+# query string makes every fetch a cache miss.
+CB="$(date +%s)$$"
+
 fetch() {
 	# $1 = url, $2 = output file
-	if uclient-fetch -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+	if uclient-fetch -q -T 60 -O "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
 		return 0
 	fi
-	# some builds only ship wget
 	if wget -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
 		return 0
 	fi
@@ -39,23 +46,33 @@ fetch() {
 log "repository : $REPO@$REF"
 log "proxy      : $PROXY"
 
-if ! fetch "${RAW}/payload/packages.txt" "$WORK/packages.txt"; then
-	log "ERROR: cannot fetch packages.txt from ${RAW}/payload/packages.txt"
+ok=0
+for BASE in \
+	"${PROXY}/https://raw.githubusercontent.com/${REPO}/${REF}" \
+	"https://raw.githubusercontent.com/${REPO}/${REF}"
+do
+	PKGURL="${BASE}/payload/packages.txt?cb=${CB}"
+	log "fetching $PKGURL"
+	if fetch "$PKGURL" "$WORK/packages.txt"; then
+		SHURL="${BASE}/payload/install.sh?cb=${CB}"
+		log "fetching $SHURL"
+		if fetch "$SHURL" "$WORK/install.sh"; then
+			ok=1
+			break
+		fi
+	fi
+done
+
+if [ "$ok" != "1" ]; then
+	log "ERROR: cannot fetch the installer from $REPO@$REF"
 	touch "$ERR"
 	rm -f "$FLAG"
 	/usr/bin/glstate error
 	exit 1
 fi
+
 log "package list:"
 cat "$WORK/packages.txt"
-
-if ! fetch "${RAW}/payload/install.sh" "$WORK/install.sh"; then
-	log "ERROR: cannot fetch install.sh from ${RAW}/payload/install.sh"
-	touch "$ERR"
-	rm -f "$FLAG"
-	/usr/bin/glstate error
-	exit 1
-fi
 
 REPO="$REPO" PROXY="$PROXY" REF="$REF" \
 	sh "$WORK/install.sh" "$WORK/packages.txt"
@@ -65,6 +82,7 @@ rm -f "$FLAG"
 if [ "$rc" -ne 0 ]; then
 	log "install failed (rc=$rc)"
 	touch "$ERR"
+	rm -f "$READY"
 	/usr/bin/glstate error
 else
 	log "install completed"

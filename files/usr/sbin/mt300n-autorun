@@ -15,9 +15,23 @@ INSTALL=/usr/sbin/mt300n-install
 
 log() { logger -t mt300n-autorun "$*"; }
 
-# Already installed and something to run it? nothing to do.
-if [ -f "$READY" ] && { [ -x /tmp/opt/bin/tailcat ] || [ -x /tmp/opt/bin/tailscaled ]; }; then
-	log "payload already present"
+# Is the payload actually usable?
+#
+# Do NOT trust the ready flag alone: an interrupted download can leave a
+# truncated binary behind while the flag from an earlier successful run is
+# still present. Such a file is not executable (it segfaults), so the only
+# honest test is to run it.
+payload_ok() {
+	[ -x /tmp/opt/bin/tailcat ] || return 1
+	/tmp/opt/bin/tailcat version >/dev/null 2>&1 || return 1
+	if [ -x /tmp/opt/bin/frpc ]; then
+		/tmp/opt/bin/frpc --version >/dev/null 2>&1 || return 1
+	fi
+	return 0
+}
+
+if payload_ok; then
+	log "payload already present and usable"
 	exit 0
 fi
 
@@ -33,7 +47,7 @@ i=0
 while :; do
 	if reachable; then
 		log "internet is up after $((i * 5))s"
-		if "$INSTALL"; then
+		if "$INSTALL" && payload_ok; then
 			log "install succeeded"
 			exit 0
 		fi
