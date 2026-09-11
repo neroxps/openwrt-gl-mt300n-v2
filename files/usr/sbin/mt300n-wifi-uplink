@@ -1,47 +1,83 @@
 #!/bin/sh
 # mt300n-wifi-uplink - temporarily connect the router to an upstream Wi-Fi AP
-# so it has internet while the WAN Ethernet port is unused.
+# so it has internet while the wired WAN port is unused.
 #
 #   mt300n-wifi-uplink on "Nero_Home" "461701018"
 #   mt300n-wifi-uplink off
 #
-# This creates a station (client) virtual interface next to the existing
-# access point - the MT7628 radio supports concurrent VAPs - and puts it in
-# the `wan` firewall zone with a DHCP client, so it provides the default route
-# exactly like the Ethernet WAN would.
+# `on` creates a station (client) virtual interface next to the existing access
+# point - the MT7628 radio supports concurrent VAPs - and puts it in the `wan`
+# firewall zone with a DHCP client, so it provides the default route exactly
+# like the Ethernet WAN would.
 #
-# `off` removes every trace of the temporary configuration so the device goes
-# back to WAN-over-Ethernet only.
-
-set -e
+# `off` removes every trace of the temporary configuration and restores the
+# wired WAN zone membership, so the device goes back to WAN-over-Ethernet.
 
 SECTION="mt300n_sta"
 IFACE="wwan"
 NET="mt300n_wwan"
+WAN_ZONE_DEFAULT="wan wan6"
 
 log() { logger -t mt300n-wifi "$*"; echo "$*"; }
 
 usage() {
-	echo "usage: $0 on <ssid> <password> | off" >&2
+	echo "usage: $0 on <ssid> [password] | off" >&2
 	exit 1
+}
+
+find_wan_zone() {
+	uci show firewall 2>/dev/null | \
+		sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'$/\1/p" | head -1
 }
 
 wifi_reload() {
 	wifi reload >/dev/null 2>&1 || wifi up >/dev/null 2>&1 || true
 }
 
-cleanup() {
-	# network
-	while uci -q delete "network.$NET"; do :; done
-	# firewall: drop the zone entry we added
-	for z in $(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'$/\1/p"); do
-		uci -q delete "firewall.$z.network" 2>/dev/null || true
+# Remove $IFACE from a zone's network list without disturbing the other members.
+zone_del() {
+	_zn="$1"; _want="$2"
+	_list="$(uci -q get "firewall.$_zn.network" 2>/dev/null)"
+	[ -n "$_list" ] || return 0
+	_keep=""
+	for _x in $_list; do
+		[ "$_x" = "$_want" ] && continue
+		_keep="$_keep $_x"
 	done
-	if uci -q get firewall.@zone[1] >/dev/null 2>&1; then
-		uci -q delete firewall.@zone[1].network 2>/dev/null || true
-	fi
-	# wifi
+	uci -q delete "firewall.$_zn.network"
+	for _x in $_keep; do
+		uci -q add_list "firewall.$_zn.network=$_x"
+	done
+}
+
+zone_add() {
+	_zn="$1"; _want="$2"
+	_list="$(uci -q get "firewall.$_zn.network" 2>/dev/null)"
+	case " $_list " in
+		*" $_want "*) return 0 ;;
+	esac
+	uci -q add_list "firewall.$_zn.network=$_want"
+}
+
+cleanup() {
+	_zn="$(find_wan_zone)"
+
+	# Drop the temporary interface config.
+	while uci -q delete "network.$NET"; do :; done
 	while uci -q delete "wireless.$SECTION"; do :; done
+
+	if [ -n "$_zn" ]; then
+		zone_del "$_zn" "$IFACE"
+		# Make sure the wired WAN stays in the zone even if we created the
+		# zone entry ourselves earlier.
+		for _w in $WAN_ZONE_DEFAULT; do
+			zone_add "$_zn" "$_w"
+		done
+	fi
+
+	# Remove the now-unused network stanzas.
+	while uci -q delete "network.$IFACE"; do :; done
+
 	uci -q commit network 2>/dev/null || true
 	uci -q commit wireless 2>/dev/null || true
 	uci -q commit firewall 2>/dev/null || true
@@ -56,12 +92,7 @@ on)
 	log "configuring temporary Wi-Fi uplink to '$SSID'"
 	cleanup
 
-	# --- station interface --------------------------------------------------
-	RADIO=$(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)\.type='radio[0-9]*'$/\1/p" | head -1)
-	if [ -z "$RADIO" ]; then
-		# fall back to any configured radio section
-		RADIO=$(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p" | head -1)
-	fi
+	RADIO="$(uci show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p" | head -1)"
 	[ -n "$RADIO" ] || { log "ERROR: no radio found"; exit 1; }
 
 	uci -q set "wireless.$SECTION=wifi-iface"
@@ -76,21 +107,13 @@ on)
 		uci -q set "wireless.$SECTION.encryption=none"
 	fi
 
-	# --- network ------------------------------------------------------------
 	uci -q set "network.$NET=interface"
 	uci -q set "network.$NET.proto=dhcp"
-	uci -q set "network.$NET.device=$IFACE"
 
-	# --- firewall: same zone as the wired WAN -------------------------------
-	WANZONE=$(uci show firewall 2>/dev/null | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'$/\1/p" | head -1)
-	if [ -z "$WANZONE" ]; then WANZONE="@zone[1]"; fi
-	uci -q set "firewall.$WANZONE.name=wan"
-	# append the new network to the zone's list without dropping existing ones
-	EXISTING=$(uci -q get "firewall.$WANZONE.network" 2>/dev/null || true)
-	case " $EXISTING " in
-		*" $IFACE "*) : ;;
-		*) uci -q add_list "firewall.$WANZONE.network=$IFACE" ;;
-	esac
+	_zn="$(find_wan_zone)"
+	[ -n "$_zn" ] || _zn="@zone[1]"
+	uci -q set "firewall.$_zn.name=wan"
+	zone_add "$_zn" "$IFACE"
 
 	uci -q commit wireless
 	uci -q commit network
@@ -99,11 +122,10 @@ on)
 	wifi_reload
 	/etc/init.d/network reload >/dev/null 2>&1 || true
 
-	# --- wait for a lease ---------------------------------------------------
 	i=0
 	while [ "$i" -lt 40 ]; do
 		if ip -4 addr show "$IFACE" 2>/dev/null | grep -q 'inet '; then
-			ADDR=$(ip -4 addr show "$IFACE" | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+			ADDR="$(ip -4 addr show "$IFACE" | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)"
 			log "uplink up: $IFACE has $ADDR"
 			exit 0
 		fi
@@ -112,7 +134,7 @@ on)
 	done
 
 	log "ERROR: no DHCP lease on $IFACE after 120s"
-	log "$(iwinfo $IFACE info 2>&1 | head -5)"
+	iwinfo "$IFACE" info 2>&1 | head -5 | while read -r l; do log "  $l"; done
 	exit 1
 	;;
 
