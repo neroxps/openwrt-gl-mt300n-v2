@@ -133,6 +133,7 @@ tailcat)
 		export HOME=/root
 		KEYN="$(uci -q get tailcat.main.key_name)"; [ -n "$KEYN" ] || KEYN=default
 		REG="$(uci -q get tailcat.main.region)";   [ -n "$REG" ] || REG=auto
+		FIX="$(uci -q get tailcat.main.fixed_region)"; [ -n "$FIX" ] || FIX=1
 		KEYFILE="/etc/tailcat/keys/$KEYN.private.json"
 		mkdir -p /etc/tailcat/keys; chmod 700 /etc/tailcat/keys 2>/dev/null
 		DM="$(uci -q get tailcat.main.derpmap_url)"
@@ -144,11 +145,14 @@ tailcat)
 		pkill -f 'bin/tailcat' 2>/dev/null
 		sleep 1
 		rm -f "$KEYFILE"
-		if [ "$REG" = "auto" ]; then
-			"$BIN/tailcat" genkey "--key=$KEYFILE" "--derpmap-url=$DM" 2>&1 | tail -3
-		else
-			"$BIN/tailcat" genkey "--key=$KEYFILE" "--region=$REG" --fixed-region "--derpmap-url=$DM" 2>&1 | tail -3
-		fi
+		# Bake the region in (see mt300n-tailcat-run): only then is the printed
+		# address constant across restarts.
+		set -- genkey "--key=$KEYFILE" "--derpmap-url=$DM"
+		[ "$REG" != "auto" ] && set -- "$@" "--region=$REG"
+		[ "$FIX" = "1" ] && set -- "$@" --fixed-region
+		"$BIN/tailcat" "$@" 2>&1 | tail -3
+		uci -q set "tailcat.main.key_region=$REG/$FIX"
+		uci -q commit tailcat
 		/etc/init.d/tailcat restart >/dev/null 2>&1
 		;;
 	ping)

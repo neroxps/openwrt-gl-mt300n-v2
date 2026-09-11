@@ -41,6 +41,7 @@ config_get      custom     main custom_ports ''
 config_get      key_name   main key_name 'default'
 config_get      region     main region 'auto'
 config_get      key_region main key_region ''
+config_get_bool fixed      main fixed_region 1
 config_get      allow      main allow ''
 config_get      sshkeys    main ssh_authorized_keys ''
 config_get      fileshare  main files_share ''
@@ -53,6 +54,15 @@ config_get      extra      main extra_args ''
 
 [ -n "$key_name" ] || key_name=default
 [ -n "$region" ]   || region=auto
+
+# The region must be BAKED INTO THE KEY, not chosen at every startup.
+#
+# With a plain auto region tailcat re-probes at each start and the DERP
+# information inside the printed address can differ between runs, so the
+# "stable" address drifts by a character - which silently breaks every client
+# that was given the previous one. --fixed-region discovers the nearest region
+# once, at generation time, and bakes it in, making the address constant.
+REGSPEC="$region/$fixed"
 
 [ -x "$BIN" ] || { log "tailcat is not installed yet"; exit 1; }
 
@@ -74,7 +84,7 @@ KEYFILE="$KEYDIR/$key_name.private.json"
 
 NEED_KEY=0
 [ -f "$KEYFILE" ] || NEED_KEY=1
-[ "$region" != "$key_region" ] && NEED_KEY=1
+[ "$REGSPEC" != "$key_region" ] && NEED_KEY=1
 
 if [ "$NEED_KEY" = "1" ]; then
 	BACKUP=""
@@ -83,9 +93,9 @@ if [ "$NEED_KEY" = "1" ]; then
 		# fails we must not lose the stable address.
 		BACKUP="$KEYFILE.bak"
 		cp -f "$KEYFILE" "$BACKUP" 2>/dev/null
-		log "DERP region changed ($key_region -> $region); regenerating key (the address changes)"
+		log "DERP region changed ($key_region -> $REGSPEC); regenerating key (the address changes)"
 	else
-		log "generating saved key '$key_name' (region=$region)"
+		log "generating saved key '$key_name' (region=$region fixed=$fixed)"
 	fi
 
 	_ok=0
@@ -97,9 +107,8 @@ if [ "$NEED_KEY" = "1" ]; then
 
 		rm -f "$KEYFILE"
 		set -- genkey "--key=$KEYFILE" "--derpmap-url=$_dm"
-		if [ "$region" != "auto" ]; then
-			set -- "$@" "--region=$region" --fixed-region
-		fi
+		[ "$region" != "auto" ] && set -- "$@" "--region=$region"
+		[ "$fixed" = "1" ] && set -- "$@" --fixed-region
 		if _out=$("$BIN" "$@" 2>&1) && [ -f "$KEYFILE" ]; then
 			_ok=1
 			break
@@ -109,7 +118,7 @@ if [ "$NEED_KEY" = "1" ]; then
 
 	if [ "$_ok" = "1" ]; then
 		rm -f "$BACKUP"
-		uci -q set "tailcat.main.key_region=$region"
+		uci -q set "tailcat.main.key_region=$REGSPEC"
 		uci -q commit tailcat
 	else
 		log "genkey failed on every DERP map source"

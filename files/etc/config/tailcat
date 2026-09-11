@@ -43,7 +43,7 @@ config tailcat 'main'
 	# Bookkeeping: the DERP region that is currently baked into the key. The
 	# service regenerates the key (and therefore the address) only when the
 	# region option below no longer matches this. Do not edit by hand.
-	option key_region 'auto'
+	option key_region 'auto/1'
 
 	# DERP relay region used to bootstrap the tunnel: 'auto' picks the one with
 	# the lowest latency at startup, otherwise a region code/id such as
@@ -51,9 +51,11 @@ config tailcat 'main'
 	# numeric id. Pick the nearest one for the best latency.
 	option region 'auto'
 
-	# Bake the region into the key at generation time instead of choosing it at
-	# every startup. Needed only if you publish the address in DNS.
-	option fixed_region '0'
+	# Bake the DERP region into the key at generation time instead of letting
+	# tailcat re-probe at every startup. This MUST stay '1' for the address to be
+	# truly stable: with an auto region the DERP info inside the address can drift
+	# between restarts, and every client that was given the old address breaks.
+	option fixed_region '1'
 
 	# Comma-separated list of client public keys allowed to connect, or 'none'
 	# to allow nobody. Empty means "any client that knows the address".
