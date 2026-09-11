@@ -7,7 +7,7 @@
 			"path": "mt300n/tailcat"
 		},
 		"depends": {
-			"acl": { "luci-app-mt300n": { "read": true } },
+			"acl": [ "luci-app-mt300n" ],
 			"uci": { "tailcat": true }
 		}
 	},
@@ -20,7 +20,7 @@
 			"path": "mt300n/frpc"
 		},
 		"depends": {
-			"acl": { "luci-app-mt300n": { "read": true } },
+			"acl": [ "luci-app-mt300n" ],
 			"uci": { "frpc": true }
 		}
 	}

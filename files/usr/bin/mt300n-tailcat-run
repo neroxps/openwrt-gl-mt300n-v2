@@ -62,22 +62,49 @@ fi
 # A saved key is what makes the tailcat address stable across reboots.
 KEYFILE="$KEYDIR/$key_name.private.json"
 
-if [ ! -f "$KEYFILE" ] || [ "$region" != "$key_region" ]; then
+NEED_KEY=0
+[ -f "$KEYFILE" ] || NEED_KEY=1
+[ "$region" != "$key_region" ] && NEED_KEY=1
+
+if [ "$NEED_KEY" = "1" ]; then
+	BACKUP=""
 	if [ -f "$KEYFILE" ]; then
+		# Keep the old key until a new one has actually been written: if genkey
+		# fails we must not lose the stable address.
+		BACKUP="$KEYFILE.bak"
+		cp -f "$KEYFILE" "$BACKUP" 2>/dev/null
 		log "DERP region changed ($key_region -> $region); regenerating key (the address changes)"
 	else
 		log "generating saved key '$key_name' (region=$region)"
 	fi
-	rm -f "$KEYFILE"
-	set -- genkey "--key=$key_name" "--derpmap-url=$dmurl"
-	if [ "$region" != "auto" ]; then
-		set -- "$@" "--region=$region" --fixed-region
-	fi
-	if "$BIN" "$@" >/dev/null 2>&1; then
+
+	_ok=0
+	for _dm in "$dmurl" "$LOCAL_DERPMAP" "$REMOTE_DERPMAP"; do
+		[ -n "$_dm" ] || continue
+		rm -f "$KEYFILE"
+		set -- genkey "--key=$key_name" "--derpmap-url=$_dm"
+		if [ "$region" != "auto" ]; then
+			set -- "$@" "--region=$region" --fixed-region
+		fi
+		if "$BIN" "$@" >/dev/null 2>&1 && [ -f "$KEYFILE" ]; then
+			_ok=1
+			break
+		fi
+		log "genkey failed against $_dm"
+	done
+
+	if [ "$_ok" = "1" ]; then
+		rm -f "$BACKUP"
 		uci -q set "tailcat.main.key_region=$region"
 		uci -q commit tailcat
 	else
-		log "genkey failed; continuing with a fresh ephemeral address"
+		log "genkey failed on every DERP map source"
+		if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
+			mv -f "$BACKUP" "$KEYFILE"
+			log "restored the previous key so the address stays the same"
+		else
+			log "continuing with a fresh ephemeral address"
+		fi
 	fi
 fi
 

@@ -17,7 +17,12 @@ CTL="$0"
 case "$0" in */*) ;; *) CTL="/usr/bin/mt300n-ctl" ;; esac
 
 have() { [ -x "$BIN/$1" ]; }
+# Match on the full command line of the actual binary, so that the procd
+# wrapper (/usr/bin/mt300n-*-run) or an init script in flight is not mistaken
+# for a running service.
 running() { pgrep -f "$1" >/dev/null 2>&1; }
+RUNS_TAILCAT='bin/tailcat'
+RUNS_FRPC='bin/frpc'
 rss_kb() {
 	_p=$(pgrep -f "$1" 2>/dev/null | head -1)
 	[ -n "$_p" ] || return 1
@@ -57,8 +62,8 @@ tailcat_status() {
 
 	echo "installed=$(have tailcat && echo 1 || echo 0)"
 	echo "enabled=$en"
-	echo "running=$(running tailcat && echo 1 || echo 0)"
-	echo "pid=$(pgrep -f 'tailcat' 2>/dev/null | head -1)"
+	echo "running=$(running "$RUNS_TAILCAT" && echo 1 || echo 0)"
+	echo "pid=$(pgrep -f "$RUNS_TAILCAT" 2>/dev/null | head -1)"
 	echo "role=$role"
 	echo "preset=$preset"
 	echo "custom_ports=$custom"
@@ -68,7 +73,7 @@ tailcat_status() {
 	if [ -f "$ADDR_FILE" ]; then
 		echo "address=$(cat "$ADDR_FILE" 2>/dev/null)"
 	fi
-	_r=$(rss_kb tailcat) && echo "rss_kb=$_r"
+	_r=$(rss_kb "$RUNS_TAILCAT") && echo "rss_kb=$_r"
 }
 
 tailcat_log() { logread 2>/dev/null | grep -iE 'tailcat' | tail -n "${1:-40}"; }
@@ -88,9 +93,9 @@ frpc_status() {
 	echo "installed=$(have frpc && echo 1 || echo 0)"
 	echo "enabled=$en"
 	echo "configured=$_conf"
-	echo "running=$(running frpc && echo 1 || echo 0)"
-	echo "pid=$(pgrep -f 'bin/frpc' 2>/dev/null | head -1)"
-	_r=$(rss_kb 'bin/frpc') && echo "rss_kb=$_r"
+	echo "running=$(running "$RUNS_FRPC" && echo 1 || echo 0)"
+	echo "pid=$(pgrep -f "$RUNS_FRPC" 2>/dev/null | head -1)"
+	_r=$(rss_kb "$RUNS_FRPC") && echo "rss_kb=$_r"
 }
 
 # --------------------------------------------------------------------- main ---

@@ -40,6 +40,11 @@ config tailcat 'main'
 	# Changing/regenerating it changes the address.
 	option key_name 'default'
 
+	# Bookkeeping: the DERP region that is currently baked into the key. The
+	# service regenerates the key (and therefore the address) only when the
+	# region option below no longer matches this. Do not edit by hand.
+	option key_region 'auto'
+
 	# DERP relay region used to bootstrap the tunnel: 'auto' picks the one with
 	# the lowest latency at startup, otherwise a region code/id such as
 	# 'tok' (Tokyo), 'fra' (Frankfurt), 'sfo' (San Francisco), 'nyc', or the

@@ -18,19 +18,32 @@
 
 var CTL = '/usr/bin/mt300n-ctl';
 
-/* rpcd's file.exec returns stdout/stderr base64-encoded. */
+/*
+ * Normalise command output.
+ *
+ * This rpcd build returns file.exec stdout/stderr as plain UTF-8 text
+ * (verified on the device). Some builds base64-encode it instead, so decode
+ * only when the string is unambiguously base64 and the result is printable -
+ * plain text always contains a newline or an "=" in the middle, which fails
+ * that test, so it is never touched.
+ */
 function decodeOut(s) {
 	if (typeof s !== 'string' || s === '')
 		return '';
-	try {
-		var bin = atob(s.replace(/\s+/g, ''));
-		var bytes = new Uint8Array(bin.length);
-		for (var i = 0; i < bin.length; i++)
-			bytes[i] = bin.charCodeAt(i);
-		return new TextDecoder('utf-8').decode(bytes);
-	} catch (e) {
-		return s;
+
+	if (/^[A-Za-z0-9+/]+={0,2}$/.test(s) && s.length % 4 === 0) {
+		try {
+			var bin = atob(s);
+			var bytes = new Uint8Array(bin.length);
+			for (var i = 0; i < bin.length; i++)
+				bytes[i] = bin.charCodeAt(i);
+			var txt = new TextDecoder('utf-8').decode(bytes);
+			if (/^[\t\n\r\x20-\x7e]*$/.test(txt))
+				return txt;
+		} catch (e) { /* not base64 after all */ }
 	}
+
+	return s;
 }
 
 function runCtl(args) {
