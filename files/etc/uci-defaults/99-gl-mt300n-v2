@@ -28,12 +28,33 @@ if uci -q get network.wan >/dev/null; then
 fi
 
 # --- SSH --------------------------------------------------------------------
-# Keep password auth enabled so a fresh image is reachable after a -n flash.
+# The whole point of this image is that it stays remotely controllable: keep
+# password auth on and make sure the admin key is present in BOTH locations
+# dropbear may consult, so a `sysupgrade -n` (config reset) cannot lock us out.
 uci -q batch <<-EOF
 	set dropbear.@dropbear[0].PasswordAuth='on'
 	set dropbear.@dropbear[0].RootPasswordAuth='on'
+	set dropbear.@dropbear[0].Interface='lan'
 	commit dropbear
 EOF
+
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+if [ -f /etc/dropbear/authorized_keys ]; then
+	cp /etc/dropbear/authorized_keys /root/.ssh/authorized_keys
+	chmod 600 /etc/dropbear/authorized_keys /root/.ssh/authorized_keys
+	chmod 700 /etc/dropbear
+	logger -t mt300n "admin ssh key installed"
+else
+	logger -t mt300n "WARNING: no authorized_keys baked into the image"
+fi
+
+# Make sure the LAN bridge really is up with the documented default address.
+if ! uci -q get network.lan.ipaddr >/dev/null; then
+	uci -q set network.lan.ipaddr='192.168.1.1'
+	uci -q set network.lan.netmask='255.255.255.0'
+	uci -q commit network
+fi
 
 # --- services ---------------------------------------------------------------
 /etc/init.d/glstatus enable
