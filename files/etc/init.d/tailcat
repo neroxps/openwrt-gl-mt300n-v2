@@ -1,0 +1,31 @@
+#!/bin/sh /etc/rc.common
+# tailcat service: netcat over Tailscale's data plane.
+#
+# The binary lives in tmpfs and is fetched after boot, so this script may be
+# asked to start before the payload exists - in that case it simply does
+# nothing and /usr/sbin/mt300n-install starts it once the install finishes.
+
+START=98
+STOP=02
+USE_PROCD=1
+
+RUNNER=/usr/bin/mt300n-tailcat-run
+
+start_service() {
+	[ -x /tmp/opt/bin/tailcat ] || {
+		logger -t tailcat "binary not installed yet - waiting for the payload"
+		return 0
+	}
+
+	procd_open_instance
+	procd_set_param command "$RUNNER"
+	procd_set_param respawn 3600 10 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	# Drop the stale address so the UI does not show a dead one.
+	logger -t tailcat "stopping"
+}

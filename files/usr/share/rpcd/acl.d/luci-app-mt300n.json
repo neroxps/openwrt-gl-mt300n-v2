@@ -1,0 +1,24 @@
+{
+	"luci-app-mt300n": {
+		"description": "Grant access to the GL-MT300N-V2 tailcat and frpc control pages",
+
+		"read": {
+			"file": {
+				"/usr/bin/mt300n-ctl": [ "exec" ]
+			},
+			"ubus": {
+				"file": [ "exec", "read", "stat" ],
+				"service": [ "list" ]
+			},
+			"uci": [ "tailcat", "frpc" ]
+		},
+
+		"write": {
+			"ubus": {
+				"file": [ "exec" ],
+				"uci": [ "set", "add", "delete", "commit", "apply", "order", "rename" ]
+			},
+			"uci": [ "tailcat", "frpc" ]
+		}
+	}
+}

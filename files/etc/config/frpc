@@ -1,0 +1,33 @@
+# /etc/config/frpc - frpc (fast reverse proxy client) configuration
+#
+# The whole frpc TOML file is stored in the `config` option below and written
+# out to /tmp/opt/etc/frpc.toml when the service starts. Keeping it in UCI means
+# LuCI can edit it directly and it survives a reboot (tmpfs does not).
+
+config frpc 'main'
+	option enabled '0'
+	option config 'serverAddr = ""
+serverPort = 7000
+
+# Keep retrying instead of exiting if the server is briefly unreachable.
+loginFailExit = false
+
+auth.method = "token"
+auth.token = ""
+
+# Example: expose the router SSH on the frps server as port 6022.
+[[proxies]]
+name = "mt300n-ssh"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 22
+remotePort = 6022
+
+# Example: expose the router web UI.
+[[proxies]]
+name = "mt300n-web"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 80
+remotePort = 6080
+'

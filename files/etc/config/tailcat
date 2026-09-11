@@ -1,0 +1,87 @@
+# /etc/config/tailcat - tailcat configuration
+#
+# tailcat is "netcat over Tailscale's data plane": it uses Tailscale's
+# WireGuard + NAT traversal + DERP relays, but no control plane and no
+# Tailscale account. It runs entirely in userspace, so it needs neither a
+# kernel TUN device nor an account.
+#
+# LuCI page: Services -> tailcat   (and Services -> frpc)
+# Start/stop: /etc/init.d/tailcat {start|stop|restart}
+# Logs:       logread | grep tailcat   (or the LuCI page)
+
+config tailcat 'main'
+	# Turn the service on. It starts at boot automatically.
+	option enabled '1'
+
+	# serve   = this router offers services to clients that know its address
+	#           (this is what you want for reaching the router from anywhere)
+	# forward = this router dials out to another tailcat server and exposes
+	#           that server's ports as local ports on the router
+	option role 'serve'
+
+	# What to expose when role=serve. One click presets:
+	#   ssh          only the router's SSH            (port 22)
+	#   web          only the router's web UI         (ports 80,443)
+	#   ssh_web      SSH + web UI                     (ports 22,80,443)  <- default
+	#   custom       use the custom_ports option below
+	#   all          every port
+	#   tailcat_ssh  tailcat's own SSH server (needs ssh_authorized_keys)
+	#   no_auth_ssh  auth-free SSH: whoever has the address gets a shell
+	#   files        SFTP file server (needs files_share)
+	#   exit_node    let clients reach this router's whole LAN
+	option preset 'ssh_web'
+
+	# Used when preset=custom. Port numbers, ranges and service names,
+	# comma-separated, e.g. "22,80,443" or "8000-8999,ssh".
+	option custom_ports ''
+
+	# Saved key name. A saved key makes the tailcat address STABLE across
+	# reboots - which is what makes "connect automatically after reboot" work.
+	# Changing/regenerating it changes the address.
+	option key_name 'default'
+
+	# DERP relay region used to bootstrap the tunnel: 'auto' picks the one with
+	# the lowest latency at startup, otherwise a region code/id such as
+	# 'tok' (Tokyo), 'fra' (Frankfurt), 'sfo' (San Francisco), 'nyc', or the
+	# numeric id. Pick the nearest one for the best latency.
+	option region 'auto'
+
+	# Bake the region into the key at generation time instead of choosing it at
+	# every startup. Needed only if you publish the address in DNS.
+	option fixed_region '0'
+
+	# Comma-separated list of client public keys allowed to connect, or 'none'
+	# to allow nobody. Empty means "any client that knows the address".
+	# Generate a client key on the client machine with:
+	#     tailcat genkey --client --key=client-default
+	option allow ''
+
+	# SSH public key sources for the 'tailcat_ssh' preset: authorized_keys file
+	# paths, literal OpenSSH public key lines, or 'user@github' which fetches
+	# https://github.com/user.keys at startup.
+	option ssh_authorized_keys ''
+
+	# Directory served by the 'files' preset, optionally with :ro (default),
+	# :rw, :wo (write-only drop box) or :wo+ (recursive drop box).
+	option files_share ''
+
+	# --- role=forward (client mode) ---------------------------------------
+	# The tailcat address of the server to connect to (or a DNS name with a
+	# "tailcat=" TXT record).
+	option forward_addr ''
+	# Port mappings, space-separated: "18022:22 18080:80".
+	# A single number means the same local and remote port. Use
+	# "local:remoteIP:remotePort" when the server runs as an exit node.
+	option forward_map ''
+	# Local bind address for the forwarded ports. 127.0.0.1 keeps them private
+	# to the router; 0.0.0.0 exposes them to the LAN.
+	option bind '127.0.0.1'
+
+	# --- advanced ---------------------------------------------------------
+	# URL of the DERP map JSON. Empty uses the mirrored copy that ships with
+	# this project (tailcat's own default, https://tailcat.dev/derpmap.json,
+	# is not reachable from every network). A local copy is also served by the
+	# router itself at http://127.0.0.1/derpmap.json
+	option derpmap_url ''
+	option verbose '0'
+	option extra_args ''

@@ -1,0 +1,57 @@
+#!/bin/sh
+# Write the frpc TOML configuration from UCI, then exec frpc.
+#
+# The TOML text is stored in the `config` option of /etc/config/frpc so that
+# LuCI can edit it directly and it survives a reboot (the binary lives in
+# tmpfs, but the configuration does not have to).
+#
+# Usage:
+#   mt300n-frpc-run            write the config and exec frpc
+#   mt300n-frpc-run --check    only validate; do not exec
+#
+# Exit codes (both modes):
+#   0  ready to run (or, with --check, ready to be started)
+#   1  frpc is not installed yet
+#   2  not configured / disabled - nothing to start
+
+. /lib/functions.sh
+
+BIN=/tmp/opt/bin/frpc
+CONFDIR=/tmp/opt/etc
+CONF="$CONFDIR/frpc.toml"
+
+CHECK=0
+[ "$1" = "--check" ] && CHECK=1
+
+log() { logger -t frpc "$*"; }
+
+[ -x "$BIN" ] || { [ "$CHECK" = 1 ] || log "frpc is not installed yet"; exit 1; }
+
+config_load frpc
+config_get      cfg     main config ''
+config_get_bool enabled main enabled 0
+
+if [ -z "$cfg" ]; then
+	[ "$CHECK" = 1 ] || log "no configuration stored in /etc/config/frpc"
+	exit 2
+fi
+
+# Nothing to connect to yet? Then do not start, and do not spam the log with an
+# endlessly retrying client.
+if ! printf '%s\n' "$cfg" | grep -qE '^[[:space:]]*serverAddr[[:space:]]*=[[:space:]]*"[^"]+"'; then
+	[ "$CHECK" = 1 ] || log "serverAddr is empty in /etc/config/frpc - not starting"
+	exit 2
+fi
+
+if [ "$enabled" != "1" ]; then
+	[ "$CHECK" = 1 ] || log "frpc is disabled in /etc/config/frpc"
+	exit 2
+fi
+
+[ "$CHECK" = 1 ] && exit 0
+
+mkdir -p "$CONFDIR"
+printf '%s\n' "$cfg" > "$CONF"
+
+log "starting frpc with $CONF"
+exec "$BIN" -c "$CONF"

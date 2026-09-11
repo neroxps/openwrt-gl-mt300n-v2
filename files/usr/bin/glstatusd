@@ -42,9 +42,11 @@ reachable() {
 
 ready() {
 	[ -f "$FLAG_READY" ] || return 1
-	[ -x /tmp/opt/bin/tailscaled ] || return 1
-	pgrep -f tailscaled >/dev/null 2>&1 || return 1
-	return 0
+	# "tools loaded": tailcat is the primary client, but the classic tailscale
+	# daemon counts too, so the LED still goes solid on either flavour.
+	[ -x /tmp/opt/bin/tailcat ]   && return 0
+	[ -x /tmp/opt/bin/tailscaled ] && return 0
+	return 1
 }
 
 # Update LINK with hysteresis and echo the effective link verdict.

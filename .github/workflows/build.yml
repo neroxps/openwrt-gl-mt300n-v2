@@ -202,6 +202,10 @@ jobs:
           cp payload-mipsel_24kc.tar.gz payload.sha256 pub/
           cp payload-tailscale-mipsel_24kc.tar.gz payload.tailscale.sha256 pub/
           cp "$GITHUB_WORKSPACE/dist/MANIFEST.txt" pub/ 2>/dev/null || true
+          # The DERP map, mirrored. tailcat's own default
+          # (https://tailcat.dev/derpmap.json) is not reachable from every
+          # network, so the device points --derpmap-url at this copy instead.
+          cp "$GITHUB_WORKSPACE/payload/derpmap.json" pub/derpmap.json
           cd pub
           git init -q -b payload
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -262,11 +266,16 @@ jobs:
           PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci"
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/files/." files/
+          # Single source of truth for the DERP map: payload/derpmap.json is
+          # also published to the payload branch, and uhttpd serves this copy
+          # locally so tailcat can bootstrap without any internet DNS.
+          cp "$GITHUB_WORKSPACE/payload/derpmap.json" files/www/derpmap.json
           # The executable bit is not reliably preserved through git on Windows
           # checkouts, so set it explicitly for everything that must run.
           find files -type f \
             \( -path '*/usr/bin/*' -o -path '*/usr/sbin/*' \
-               -o -path '*/etc/init.d/*' -o -path '*/etc/uci-defaults/*' \) \
+               -o -path '*/etc/init.d/*' -o -path '*/etc/uci-defaults/*' \
+               -o -path '*/etc/profile.d/*' \) \
             -exec chmod 0755 {} +
           echo "--- staged files (mode) ---"
           find files -type f -exec ls -l {} \;

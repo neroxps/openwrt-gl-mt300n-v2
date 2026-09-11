@@ -31,13 +31,23 @@ fi
 # The whole point of this image is that it stays remotely controllable: keep
 # password auth on and make sure the admin key is present in BOTH locations
 # dropbear may consult, so a `sysupgrade -n` (config reset) cannot lock us out.
+#
+# Do NOT restrict dropbear to an interface. Binding it to `lan` (which an
+# earlier revision of this image did) makes it listen only on the LAN addresses,
+# so 127.0.0.1 and ::1 are dead - and that silently breaks every localhost
+# based tunnel, including `tailcat serve 22`, whose whole job is to proxy the
+# router's own SSH. Inbound access is controlled by the firewall zone, not by
+# the bind address, so listening on all interfaces is both the OpenWrt default
+# and the safe choice here.
 uci -q batch <<-EOF
 	set dropbear.@dropbear[0].PasswordAuth='on'
 	set dropbear.@dropbear[0].RootPasswordAuth='on'
-	set dropbear.@dropbear[0].Interface='lan'
+	delete dropbear.@dropbear[0].Interface
 	commit dropbear
 EOF
 
+# uhttpd must also answer on loopback for the same reason: the tunnel proxies
+# to localhost, and the local DERP map is served at http://127.0.0.1/derpmap.json
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 if [ -f /etc/dropbear/authorized_keys ]; then
@@ -59,10 +69,12 @@ fi
 # --- services ---------------------------------------------------------------
 /etc/init.d/glstatus enable
 /etc/init.d/mt300n-payload enable
+# tailcat and frpc start at boot; they no-op until the payload has been fetched
+# and, for frpc, until serverAddr has been configured.
+/etc/init.d/tailcat enable
+/etc/init.d/frpc enable
 
 # NOTE: no swap is possible on this target - the ramips/mt76x8 kernel is built
 # without CONFIG_SWAP, so /proc/swaps does not exist and zram cannot help.
-# The payload is therefore kept as small as possible (see the payload job) and
-# tailscaled is started with a Go memory limit.
 
 exit 0

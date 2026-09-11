@@ -1,0 +1,179 @@
+#!/bin/sh
+# mt300n-ctl - status and control helper for the GL-MT300N-V2 runtime payload.
+#
+# Used both from the shell and from LuCI (the web UI runs it through
+# `ubus call file exec`). Output is either `key=value` lines (status) or plain
+# text (logs), which is easy to parse on both sides.
+#
+#   mt300n-ctl status
+#   mt300n-ctl payload [status|install]
+#   mt300n-ctl frpc    [status|start|stop|restart|log [n]]
+#   mt300n-ctl tailcat [status|start|stop|restart|log [n]|address|genkey|ping]
+
+BIN=/tmp/opt/bin
+ADDR_FILE=/etc/tailcat/address
+
+CTL="$0"
+case "$0" in */*) ;; *) CTL="/usr/bin/mt300n-ctl" ;; esac
+
+have() { [ -x "$BIN/$1" ]; }
+running() { pgrep -f "$1" >/dev/null 2>&1; }
+rss_kb() {
+	_p=$(pgrep -f "$1" 2>/dev/null | head -1)
+	[ -n "$_p" ] || return 1
+	awk '/^VmRSS:/{print $2}' "/proc/$_p/status" 2>/dev/null
+}
+
+svc_state() {
+	# $1 = init script name
+	if [ -x "/etc/init.d/$1" ]; then
+		/etc/init.d/"$1" status 2>&1 | grep -q running && echo 1 || echo 0
+	else
+		echo 0
+	fi
+}
+
+# ------------------------------------------------------------------ payload --
+payload_status() {
+	echo "tailcat_installed=$(have tailcat && echo 1 || echo 0)"
+	echo "frpc_installed=$(have frpc && echo 1 || echo 0)"
+	echo "tailscale_installed=$(have tailscaled && echo 1 || echo 0)"
+	[ -f /tmp/.mt300n-ready ] && echo "ready=1" || echo "ready=0"
+	[ -f /tmp/.mt300n-installing ] && echo "installing=1" || echo "installing=0"
+	[ -f /tmp/.mt300n-error ] && echo "error=1" || echo "error=0"
+}
+
+# ------------------------------------------------------------------- tailcat --
+tailcat_status() {
+	. /lib/functions.sh
+	config_load tailcat
+	config_get      role   main role 'serve'
+	config_get      preset main preset 'ssh_web'
+	config_get      custom main custom_ports ''
+	config_get      region main region 'auto'
+	config_get      keyn   main key_name 'default'
+	config_get      faddr  main forward_addr ''
+	config_get_bool en     main enabled 1
+
+	echo "installed=$(have tailcat && echo 1 || echo 0)"
+	echo "enabled=$en"
+	echo "running=$(running tailcat && echo 1 || echo 0)"
+	echo "pid=$(pgrep -f 'tailcat' 2>/dev/null | head -1)"
+	echo "role=$role"
+	echo "preset=$preset"
+	echo "custom_ports=$custom"
+	echo "region=$region"
+	echo "key_name=$keyn"
+	echo "forward_addr=$faddr"
+	if [ -f "$ADDR_FILE" ]; then
+		echo "address=$(cat "$ADDR_FILE" 2>/dev/null)"
+	fi
+	_r=$(rss_kb tailcat) && echo "rss_kb=$_r"
+}
+
+tailcat_log() { logread 2>/dev/null | grep -iE 'tailcat' | tail -n "${1:-40}"; }
+frpc_log()    { logread 2>/dev/null | grep -iE 'frpc'    | tail -n "${1:-40}"; }
+
+# ---------------------------------------------------------------------- frpc --
+frpc_status() {
+	. /lib/functions.sh
+	config_load frpc
+	config_get_bool en main enabled 0
+	_cfg="$(uci -q get frpc.main.config)"
+
+	_conf=0
+	if printf '%s\n' "$_cfg" | grep -qE '^[[:space:]]*serverAddr[[:space:]]*=[[:space:]]*"[^"]+"'; then
+		_conf=1
+	fi
+	echo "installed=$(have frpc && echo 1 || echo 0)"
+	echo "enabled=$en"
+	echo "configured=$_conf"
+	echo "running=$(running frpc && echo 1 || echo 0)"
+	echo "pid=$(pgrep -f 'bin/frpc' 2>/dev/null | head -1)"
+	_r=$(rss_kb 'bin/frpc') && echo "rss_kb=$_r"
+}
+
+# --------------------------------------------------------------------- main ---
+case "$1" in
+status)
+	payload_status
+	echo "---"
+	tailcat_status
+	echo "---"
+	frpc_status
+	;;
+
+payload)
+	case "$2" in
+	install) /usr/sbin/mt300n-install ;;
+	*)      payload_status ;;
+	esac
+	;;
+
+tailcat)
+	case "$2" in
+	status)  tailcat_status ;;
+	start)   /etc/init.d/tailcat start ;;
+	stop)    /etc/init.d/tailcat stop ;;
+	restart) /etc/init.d/tailcat restart ;;
+	log)     tailcat_log "$3" ;;
+	address)
+		[ -f "$ADDR_FILE" ] && cat "$ADDR_FILE" || echo ""
+		;;
+	genkey)
+		# Force a new saved key. The tailcat address changes.
+		KEYN="$(uci -q get tailcat.main.key_name)"; [ -n "$KEYN" ] || KEYN=default
+		REG="$(uci -q get tailcat.main.region)";   [ -n "$REG" ] || REG=auto
+		DM="$(uci -q get tailcat.main.derpmap_url)"
+		if [ -z "$DM" ]; then
+			DM="http://127.0.0.1/derpmap.json"
+			uclient-fetch -q -T 8 -O /dev/null "$DM" 2>/dev/null || \
+				DM="https://ghfast.top/https://raw.githubusercontent.com/neroxps/openwrt-gl-mt300n-v2/payload/derpmap.json"
+		fi
+		pkill -f 'bin/tailcat' 2>/dev/null
+		sleep 1
+		rm -f "/root/.config/tailcat/keys/$KEYN.private.json"
+		if [ "$REG" = "auto" ]; then
+			"$BIN/tailcat" genkey "--key=$KEYN" "--derpmap-url=$DM" 2>&1 | tail -3
+		else
+			"$BIN/tailcat" genkey "--key=$KEYN" "--region=$REG" --fixed-region "--derpmap-url=$DM" 2>&1 | tail -3
+		fi
+		/etc/init.d/tailcat restart >/dev/null 2>&1
+		;;
+	ping)
+		# End-to-end tunnel self-test: connect to our own address as a client.
+		ADDR="$(cat "$ADDR_FILE" 2>/dev/null)"
+		[ -n "$ADDR" ] || { echo "no address yet"; exit 1; }
+		DM="$(uci -q get tailcat.main.derpmap_url)"
+		[ -n "$DM" ] || DM="http://127.0.0.1/derpmap.json"
+		uclient-fetch -q -T 8 -O /dev/null "$DM" 2>/dev/null || \
+			DM="https://ghfast.top/https://raw.githubusercontent.com/neroxps/openwrt-gl-mt300n-v2/payload/derpmap.json"
+		"$BIN/tailcat" --derpmap-url="$DM" ping "$ADDR" 2>&1 | grep -iE 'pong|error|deadline' | tail -5
+		;;
+	*) echo "usage: $0 tailcat {status|start|stop|restart|log [n]|address|genkey|ping}" ;;
+	esac
+	;;
+
+frpc)
+	case "$2" in
+	status)  frpc_status ;;
+	start)   /etc/init.d/frpc start ;;
+	stop)    /etc/init.d/frpc stop ;;
+	restart) /etc/init.d/frpc restart ;;
+	log)     frpc_log "$3" ;;
+	*) echo "usage: $0 frpc {status|start|stop|restart|log [n]}" ;;
+	esac
+	;;
+
+*)
+	cat <<EOF
+usage: $0 <command>
+
+  status                      everything at a glance
+  payload [status|install]    payload state / (re)install it
+  frpc    {status|start|stop|restart|log [n]}
+  tailcat {status|start|stop|restart|log [n]|address|genkey|ping}
+EOF
+	exit 1
+	;;
+esac

@@ -104,59 +104,37 @@ if [ -n "$MISSING" ]; then
 fi
 
 # ---------------------------------------------------------------- services ---
-# tailscaled: state and socket live in tmpfs as well.
-#
-# This target has 128 MB of RAM and NO swap (the mt76x8 kernel is built without
-# CONFIG_SWAP), and 46 MB of the RAM is permanently occupied by the payload in
-# tmpfs. tailscaled is a Go program, so cap its heap explicitly with GOMEMLIMIT
-# and make the collector work a little harder; that keeps its RSS around 30 MB
-# instead of letting it grow until the OOM killer steps in.
+# The binaries live in tmpfs, but their configuration lives in flash
+# (/etc/config/frpc and /etc/config/tailcat), so the services are ordinary
+# procd services that come back on their own after a reboot. Starting them
+# here just makes them live immediately after the payload has been fetched.
+
+start_service() {
+	# $1 = init script name
+	if [ -x "/etc/init.d/$1" ]; then
+		log "starting service: $1"
+		/etc/init.d/"$1" restart >/dev/null 2>&1 || log "$1 restart returned non-zero"
+	else
+		log "no /etc/init.d/$1 in this image"
+	fi
+}
+
+# tailcat: userspace WireGuard over Tailscale's data plane.
+start_service tailcat
+
+# frpc: stays idle until serverAddr is configured in the web UI.
+start_service frpc
+
+# Optional classic Tailscale client, if that flavour was installed instead.
 if [ -x "$BIN/tailscaled" ]; then
 	if ! pgrep -f 'tailscaled' >/dev/null 2>&1; then
 		log "starting tailscaled (GOMEMLIMIT=24MiB)"
 		GOMEMLIMIT=24MiB GOGC=50 \
 		start-stop-daemon -S -b -q -x "$BIN/tailscaled" -- \
-			--state="$VAR/lib/tailscale/tailscaled.state" \
+			--state="$DEST/var/lib/tailscale/tailscaled.state" \
 			--socket="$RUN/tailscaled.sock" \
 			--port=41641 \
 			>>/tmp/opt/tailscaled.log 2>&1 || log "tailscaled start failed"
-	fi
-fi
-
-# frpc: only started when a config with a server exists.
-FRPC_CONF="$DEST/etc/frpc.toml"
-if [ ! -f "$FRPC_CONF" ]; then
-	cat > "$FRPC_CONF" <<-'EOF'
-	# frpc configuration for GL-MT300N-V2.
-	# Fill in serverAddr/serverPort and token, then run:
-	#   /tmp/opt/bin/frpc -c /tmp/opt/etc/frpc.toml
-	# or simply re-run:  /usr/sbin/mt300n-install
-	serverAddr = ""
-	serverPort = 7000
-	# Keep retrying instead of exiting when the server is briefly unreachable.
-	loginFailExit = false
-	auth.method = "token"
-	auth.token = ""
-
-	[[proxies]]
-	name = "mt300n-ssh"
-	type = "tcp"
-	localIP = "127.0.0.1"
-	localPort = 22
-	remotePort = 6022
-	EOF
-	log "wrote default frpc config to $FRPC_CONF"
-fi
-
-if [ -x "$BIN/frpc" ]; then
-	if grep -qE '^[[:space:]]*serverAddr[[:space:]]*=[[:space:]]*"[^"]+"' "$FRPC_CONF" 2>/dev/null; then
-		if ! pgrep -f 'frpc' >/dev/null 2>&1; then
-			log "starting frpc"
-			start-stop-daemon -S -b -q -x "$BIN/frpc" -- -c "$FRPC_CONF" \
-				>>/tmp/opt/frpc.log 2>&1 || log "frpc start failed"
-		fi
-	else
-		log "frpc installed but not started: serverAddr is empty in $FRPC_CONF"
 	fi
 fi
 

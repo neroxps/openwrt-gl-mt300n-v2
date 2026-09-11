@@ -1,0 +1,136 @@
+#!/bin/sh
+# Build the tailcat command line from /etc/config/tailcat and exec it.
+#
+# Kept separate from the init script so the very same logic runs whether
+# tailcat is started by procd at boot, restarted from LuCI, or run by hand.
+#
+# Exit codes:
+#   0  tailcat replaced this process (normal)
+#   1  not installed yet  - the payload arrives after the WAN gets internet
+#   2  misconfigured      - e.g. role=forward without an address
+
+. /lib/functions.sh
+
+BIN=/tmp/opt/bin/tailcat
+ADDR_DIR=/etc/tailcat
+ADDR_FILE=$ADDR_DIR/address
+KEYDIR=/root/.config/tailcat/keys
+
+# tailcat's built-in default (https://tailcat.dev/derpmap.json) is not
+# reachable from every network, so we prefer a copy served by the router
+# itself and fall back to the mirrored copy in this project's repository.
+LOCAL_DERPMAP="http://127.0.0.1/derpmap.json"
+REMOTE_DERPMAP="https://ghfast.top/https://raw.githubusercontent.com/neroxps/openwrt-gl-mt300n-v2/payload/derpmap.json"
+
+log() { logger -t tailcat "$*"; }
+
+config_load tailcat
+
+config_get      role      main role 'serve'
+config_get      preset    main preset 'ssh_web'
+config_get      custom    main custom_ports ''
+config_get      key_name  main key_name 'default'
+config_get      region    main region 'auto'
+config_get      key_region main key_region ''
+config_get      allow     main allow ''
+config_get      sshkeys   main ssh_authorized_keys ''
+config_get      fileshare main files_share ''
+config_get      faddr     main forward_addr ''
+config_get      fmap      main forward_map ''
+config_get      bind      main bind '127.0.0.1'
+config_get      dmurl     main derpmap_url ''
+config_get_bool verbose   main verbose 0
+config_get      extra     main extra_args ''
+
+[ -n "$key_name" ] || key_name=default
+[ -n "$region" ]   || region=auto
+
+[ -x "$BIN" ] || { log "tailcat is not installed yet"; exit 1; }
+
+mkdir -p "$ADDR_DIR" "$KEYDIR"
+
+# ---------------------------------------------------------------- DERP map --
+if [ -z "$dmurl" ]; then
+	if uclient-fetch -q -T 8 -O /dev/null "$LOCAL_DERPMAP" 2>/dev/null; then
+		dmurl="$LOCAL_DERPMAP"
+	else
+		dmurl="$REMOTE_DERPMAP"
+	fi
+fi
+
+# --------------------------------------------------------------- saved key --
+# A saved key is what makes the tailcat address stable across reboots.
+KEYFILE="$KEYDIR/$key_name.private.json"
+
+if [ ! -f "$KEYFILE" ] || [ "$region" != "$key_region" ]; then
+	if [ -f "$KEYFILE" ]; then
+		log "DERP region changed ($key_region -> $region); regenerating key (the address changes)"
+	else
+		log "generating saved key '$key_name' (region=$region)"
+	fi
+	rm -f "$KEYFILE"
+	set -- genkey "--key=$key_name" "--derpmap-url=$dmurl"
+	if [ "$region" != "auto" ]; then
+		set -- "$@" "--region=$region" --fixed-region
+	fi
+	if "$BIN" "$@" >/dev/null 2>&1; then
+		uci -q set "tailcat.main.key_region=$region"
+		uci -q commit tailcat
+	else
+		log "genkey failed; continuing with a fresh ephemeral address"
+	fi
+fi
+
+# ------------------------------------------------------------ serve target --
+svc=""
+case "$preset" in
+	ssh)         svc="22" ;;
+	web)         svc="80,443" ;;
+	ssh_web)     svc="22,80,443" ;;
+	custom)      svc="$custom" ;;
+	all)         svc="all" ;;
+	tailcat_ssh) svc="ssh" ;;
+	no_auth_ssh) svc="no-auth-ssh" ;;
+	files)       svc="files" ;;
+	exit_node)   svc="exit-node" ;;
+	*)           svc="22,80,443" ;;
+esac
+
+# ------------------------------------------------------------------- argv ---
+set -- "$BIN"
+[ "$verbose" = "1" ] && set -- "$@" --verbose
+set -- "$@" "--derpmap-url=$dmurl"
+
+case "$role" in
+forwards|forward)
+	[ -n "$faddr" ] || { log "role=forward but forward_addr is empty"; exit 2; }
+	[ -n "$fmap" ]  || { log "role=forward but forward_map is empty";  exit 2; }
+	set -- "$@" "--key=$key_name" forward "--bind=$bind" "$faddr"
+	for m in $fmap; do
+		set -- "$@" "$m"
+	done
+	[ -n "$extra" ] && set -- "$@" $extra
+	;;
+*)
+	[ -n "$svc" ] || { log "no service configured"; exit 2; }
+	[ -n "$allow" ] && set -- "$@" "--allow=$allow"
+	if [ "$preset" = "tailcat_ssh" ] && [ -n "$sshkeys" ]; then
+		set -- "$@" "--ssh-authorized-keys=$sshkeys"
+	fi
+	if [ -n "$fileshare" ]; then
+		set -- "$@" "--files=$fileshare"
+	fi
+	set -- "$@" "--key=$key_name" serve
+	for s in $(echo "$svc" | tr ',' ' '); do
+		set -- "$@" "$s"
+	done
+	[ -n "$extra" ] && set -- "$@" $extra
+	;;
+esac
+
+# Publish the address where LuCI can read it, even while tailcat runs.
+TAILCAT_ADDR_FILE="$ADDR_FILE"
+export TAILCAT_ADDR_FILE
+
+log "starting: $*"
+exec "$@"

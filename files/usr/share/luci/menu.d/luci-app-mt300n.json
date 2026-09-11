@@ -1,0 +1,27 @@
+{
+	"admin/services/tailcat": {
+		"title": "tailcat",
+		"order": 55,
+		"action": {
+			"type": "view",
+			"path": "mt300n/tailcat"
+		},
+		"depends": {
+			"acl": { "luci-app-mt300n": { "read": true } },
+			"uci": { "tailcat": true }
+		}
+	},
+
+	"admin/services/frpc": {
+		"title": "frpc",
+		"order": 56,
+		"action": {
+			"type": "view",
+			"path": "mt300n/frpc"
+		},
+		"depends": {
+			"acl": { "luci-app-mt300n": { "read": true } },
+			"uci": { "frpc": true }
+		}
+	}
+}
