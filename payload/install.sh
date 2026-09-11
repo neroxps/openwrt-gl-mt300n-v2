@@ -30,16 +30,38 @@ die() { log "FATAL: $*"; touch "$ERR"; rm -f "$FLAG"; /usr/bin/glstate error; ex
 /usr/bin/glstate installing
 
 # ---------------------------------------------------------------- space ------
+# Reclaim the destination BEFORE checking free space.
+#
+# An interrupted transfer (link drop, power cut, service restart) leaves a
+# half-written binary behind. Those leftovers are unusable but still occupy
+# tmpfs, so without this cleanup a single failed download permanently wedges
+# the installer: every later attempt reports "not enough tmpfs space" and the
+# router never recovers. Everything here is re-fetched on every boot anyway.
+rm -rf "$BIN" "$DEST/stg" "$DEST"/tmp.* 2>/dev/null
 mkdir -p "$BIN" "$RUN" "$VAR/lib/tailscale" "$DEST/etc"
+
 AVAIL=$(df -k /tmp | awk 'NR==2 {print $4}')
 log "tmpfs free: $((AVAIL / 1024)) MB"
 [ "$AVAIL" -gt 25000 ] || die "not enough tmpfs space (${AVAIL}kB free), need ~25MB"
 
 # ---------------------------------------------------------------- fetch ------
-# Download an asset and stream it straight into tar, so the archive is never
-# stored twice in RAM.
-fetch_stream() {
+download() {
+	# $1 = url, $2 = output file
+	uclient-fetch -q -T 120 -O "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
+	rm -f "$2"
+	wget -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ] && return 0
+	rm -f "$2"
+	return 1
+}
+
+# Download an asset, verify its published SHA-256 when available, then extract
+# it. The archive is removed straight away so only the extracted binaries stay
+# resident. Extraction goes into a staging directory first: a truncated
+# archive can therefore never leave a partial binary in $BIN.
+fetch_asset() {
 	ASSET="$1"
+	ARC="/tmp/.$ASSET"
+	STG="$DEST/stg"
 
 	# Ordered list of sources. NOTE: GitHub's /releases/latest/download/ URL
 	# answers with a 302 and the OpenWrt downloaders do not follow redirects, so
@@ -57,14 +79,56 @@ fetch_stream() {
 			"https://github.com/${REPO}/releases/download/${TAG}/${ASSET}"
 	fi
 
+	# The matching .sha256, when the asset has one.
+	SHAURL="$(echo "$ASSET" | sed 's/\.tar\.gz$/.sha256/')"
 	for URL in "$@"; do
 		log "trying $URL"
-		if uclient-fetch -q -O - "$URL" 2>/dev/null | tar -xzf - -C "$DEST" 2>/dev/null; then
+		rm -f "$ARC"
+		download "$URL" "$ARC" || continue
+
+		# Integrity check (best effort: only when a checksum is published).
+		rm -f /tmp/.sha
+		if [ "$SHAURL" != "$ASSET" ]; then
+			BASE="$(echo "$URL" | sed "s|$ASSET\$|$SHAURL|")"
+			download "$BASE" /tmp/.sha 2>/dev/null
+		fi
+		if [ -s /tmp/.sha ]; then
+			WANT="$(awk 'NR==1{print $1}' /tmp/.sha)"
+			GOT="$(sha256sum "$ARC" | cut -d' ' -f1)"
+			if [ -n "$WANT" ] && [ "$WANT" != "$GOT" ]; then
+				log "sha256 mismatch for $ASSET ($WANT != $GOT) - trying next source"
+				rm -f "$ARC" /tmp/.sha
+				continue
+			fi
+			log "sha256 ok for $ASSET"
+		fi
+		rm -f /tmp/.sha
+
+		rm -rf "$STG"
+		mkdir -p "$STG"
+		if tar -xzf "$ARC" -C "$STG" 2>/dev/null; then
+			# Move the freshly extracted entries into place atomically enough:
+			# nothing partial ever appears in $BIN.
+			mkdir -p "$BIN"
+			for item in "$STG"/*; do
+				[ -e "$item" ] || continue
+				bn="$(basename "$item")"
+				if [ "$bn" = "bin" ]; then
+					for f in "$item"/*; do
+						[ -e "$f" ] || continue
+						rm -rf "$BIN/$(basename "$f")"
+						mv "$f" "$BIN/"
+					done
+				else
+					rm -rf "$DEST/$bn"
+					mv "$item" "$DEST/"
+				fi
+			done
+			rm -rf "$STG" "$ARC"
 			return 0
 		fi
-		if wget -q -O - "$URL" 2>/dev/null | tar -xzf - -C "$DEST" 2>/dev/null; then
-			return 0
-		fi
+		log "extract failed for $ASSET"
+		rm -rf "$STG" "$ARC"
 	done
 	return 1
 }
@@ -75,7 +139,7 @@ ASSETS=$(awk '!/^#/ && NF>=3 {print $2}' "$PKGLIST" | sort -u)
 
 for A in $ASSETS; do
 	log "fetching $A"
-	fetch_stream "$A" || die "cannot download $A"
+	fetch_asset "$A" || die "cannot download $A"
 done
 
 chmod +x "$BIN"/* 2>/dev/null

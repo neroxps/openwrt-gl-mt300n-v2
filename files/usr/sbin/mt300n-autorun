@@ -1,15 +1,22 @@
 #!/bin/sh
-# mt300n-autorun - wait for internet, then run the payload installer once.
+# mt300n-autorun - wait for internet, then install the payload.
+#
 # Started by /etc/init.d/mt300n-payload at every boot: the payload lives in
 # tmpfs, so it has to be re-fetched after a reboot.
+#
+# This loops forever on purpose. An earlier revision gave up after 900s and
+# exited, and because procd respawned it with the same 900s wait, a router
+# whose uplink came up late could sit without tailcat/frpc for up to 15
+# minutes. Polling continuously means the tools appear as soon as the WAN is
+# usable - which is exactly when the LED is allowed to go solid.
 
 READY=/tmp/.mt300n-ready
 INSTALL=/usr/sbin/mt300n-install
 
 log() { logger -t mt300n-autorun "$*"; }
 
-# Already installed and running? nothing to do.
-if [ -f "$READY" ] && [ -x /tmp/opt/bin/tailscaled ] && pgrep -f tailscaled >/dev/null 2>&1; then
+# Already installed and something to run it? nothing to do.
+if [ -f "$READY" ] && { [ -x /tmp/opt/bin/tailcat ] || [ -x /tmp/opt/bin/tailscaled ]; }; then
 	log "payload already present"
 	exit 0
 fi
@@ -23,14 +30,21 @@ reachable() {
 
 log "waiting for internet (WAN dhcp)"
 i=0
-while [ "$i" -lt 180 ]; do
+while :; do
 	if reachable; then
 		log "internet is up after $((i * 5))s"
-		exec "$INSTALL"
+		if "$INSTALL"; then
+			log "install succeeded"
+			exit 0
+		fi
+		log "install did not succeed - retrying in 60s"
+		sleep 60
+		i=$((i + 12))
+		continue
 	fi
+
 	i=$((i + 1))
+	# one line a minute keeps the log readable while offline
+	[ $((i % 12)) -eq 0 ] && log "still no internet after $((i * 5))s"
 	sleep 5
 done
-
-log "no internet after 900s - leaving LED in the offline state"
-exit 1
