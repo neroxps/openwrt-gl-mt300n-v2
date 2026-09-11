@@ -93,18 +93,30 @@ jobs:
       - name: Package payload
         run: |
           set -eux
-          cd dist
-          mkdir -p bin
-          # `tailscale` is the same binary as `tailscaled` (argv[0] dispatch).
-          ln -sf tailscaled bin/tailscale
-          "$GITHUB_WORKSPACE/dist/bin/tailscaled" --version > bin/VERSION-tailscale 2>&1 || true
-          "$GITHUB_WORKSPACE/dist/bin/frpc" --version > bin/VERSION-frpc 2>&1 || true
+          cd "$GITHUB_WORKSPACE"
+          # `tailscale` is the same binary as `tailscaled` (argv[0] dispatch),
+          # exactly as the OpenWrt package does it.
+          ln -sf tailscaled dist/bin/tailscale
+          # Sanity-check the cross build. NOTE: these are MIPS binaries and
+          # cannot be executed on the x86 runner.
+          file dist/bin/tailscaled dist/bin/frpc
+          for f in tailscaled frpc; do
+            file "dist/bin/$f" | grep -q 'MIPS' || { echo "ERROR: $f is not a MIPS binary"; exit 1; }
+          done
           # Record sizes for the flash/RAM budget.
-          ls -l bin > MANIFEST.txt
-          cat MANIFEST.txt
-          tar -czf "$GITHUB_WORKSPACE/payload-mipsel_24kc.tar.gz" -C dist bin
-          ls -l "$GITHUB_WORKSPACE/payload-mipsel_24kc.tar.gz"
-          sha256sum "$GITHUB_WORKSPACE/payload-mipsel_24kc.tar.gz" | tee payload.sha256
+          ls -l dist/bin | tee dist/MANIFEST.txt
+          tar -czf payload-mipsel_24kc.tar.gz -C dist bin
+          ls -l payload-mipsel_24kc.tar.gz
+          sha256sum payload-mipsel_24kc.tar.gz | tee payload.sha256
+
+      - name: Show payload summary
+        run: |
+          set -eux
+          tar -tzvf payload-mipsel_24kc.tar.gz
+          echo "--- extracted size ---"
+          tar -xzf payload-mipsel_24kc.tar.gz -C /tmp --transform 's,^bin,payloadcheck,'
+          du -sh /tmp/payloadcheck || true
+          du -sb /tmp/payloadcheck || true
 
       - uses: actions/upload-artifact@v5
         with:
@@ -128,7 +140,8 @@ jobs:
           IB="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.zst"
           curl -fsSL -o "$IB" "$BASE/$IB"
           curl -fsSL -o sha256sums "$BASE/sha256sums"
-          grep " ${IB}\$" sha256sums | sha256sum -c -
+          # OpenWrt's sha256sums uses the binary-mode marker: "<hash> *<file>"
+          grep -F "*${IB}" sha256sums | sha256sum -c -
           tar --zstd -xf "$IB"
           echo "IBDIR=$PWD/openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}" >> "$GITHUB_ENV"
 
