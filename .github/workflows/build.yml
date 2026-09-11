@@ -164,6 +164,14 @@ jobs:
           PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci zram-swap"
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/files/." files/
+          # The executable bit is not reliably preserved through git on Windows
+          # checkouts, so set it explicitly for everything that must run.
+          find files -type f \
+            \( -path '*/usr/bin/*' -o -path '*/usr/sbin/*' \
+               -o -path '*/etc/init.d/*' -o -path '*/etc/uci-defaults/*' \) \
+            -exec chmod 0755 {} +
+          echo "--- staged files (mode) ---"
+          find files -type f -exec ls -l {} \;
           # Optional: bake an SSH public key so the flashed router is reachable
           # even right after a `sysupgrade -n` (config reset).
           if [ -n "${{ secrets.SSH_AUTHORIZED_KEY }}" ]; then
