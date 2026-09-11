@@ -59,7 +59,10 @@ mkdir -p "$BIN" "$RUN" "$VAR/lib/tailscale" "$DEST/etc"
 
 AVAIL=$(df -k /tmp | awk 'NR==2 {print $4}')
 log "tmpfs free: $((AVAIL / 1024)) MB"
-[ "$AVAIL" -gt 40000 ] || die "not enough tmpfs space (${AVAIL}kB free), need ~40MB"
+# The downloaded archive (~12 MB) and the extracted payload (~37 MB) have to
+# coexist, so ~50 MB must be free or extraction dies halfway with a confusing
+# "extract failed". Fail early with an honest message instead.
+[ "$AVAIL" -gt 50000 ] || die "not enough tmpfs space (${AVAIL}kB free), need ~50MB for archive + extracted payload"
 
 # ---------------------------------------------------------------- fetch ------
 download() {
