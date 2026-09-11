@@ -22,13 +22,24 @@ env:
   PROFILE: glinet_gl-mt300n-v2
   TAILSCALE_VERSION: v1.98.3
   FRP_VERSION: v0.66.0
+  # tailcat: netcat over Tailscale's data plane, no control plane / no account.
+  # https://github.com/tailscale/tailcat
+  TAILCAT_REF: main
 
 jobs:
   # ---------------------------------------------------------------- payload --
-  # Compile the runtime payload (tailscale + frpc) for mipsel_24kc/softfloat.
-  # Tailscale is built exactly the way OpenWrt does it: a single `tailscaled`
-  # binary that also acts as the CLI (symlinked to `tailscale`) plus the
-  # feature-omitting build tags, which keeps it small enough for 16 MB flash.
+  # Cross-compile the runtime payload for mipsel_24kc/softfloat.
+  #
+  # Two flavours, because the device only has 128 MB of RAM and the payload
+  # lives in tmpfs (/tmp is a 60 MB tmpfs):
+  #
+  #   default             tailcat + frpc            (~47 MB)
+  #   tailscale (optional) tailscaled + CLI          (~30 MB)
+  #
+  # tailcat is the default because it needs neither a Tailscale account nor a
+  # kernel TUN device - it runs entirely in userspace (userspace WireGuard +
+  # gVisor netstack). tailscaled is kept as a separate tarball so it can be
+  # enabled on demand, but it is not part of the default install.
   payload:
     name: build runtime payload
     runs-on: ubuntu-24.04
@@ -90,33 +101,92 @@ jobs:
           go build -trimpath -ldflags "-s -w -buildid=" -o "${GITHUB_WORKSPACE}/dist/bin/frpc" ./cmd/frpc
           mipsel-linux-gnu-strip --strip-unneeded "${GITHUB_WORKSPACE}/dist/bin/frpc" || true
 
+      - name: Fetch tailcat source
+        uses: actions/checkout@v5
+        with:
+          repository: tailscale/tailcat
+          ref: ${{ env.TAILCAT_REF }}
+          path: src/tailcat
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: src/tailcat/go.mod
+          cache-dependency-path: src/tailcat/go.sum
+
+      - name: Build tailcat
+        working-directory: src/tailcat
+        env:
+          GOOS: linux
+          GOARCH: mipsle
+          GOMIPS: softfloat
+          CGO_ENABLED: '0'
+        run: |
+          set -eux
+          # tailcat ships its own recommended tag list; it omits every
+          # tailscale.com feature the tool does not use (~16% smaller).
+          TAGS="$(cat build-tags.txt)"
+          echo "tags: $TAGS"
+          mkdir -p "${GITHUB_WORKSPACE}/dist/bin"
+          go build -trimpath -tags "$TAGS" -ldflags "-s -w -buildid=" \
+            -o "${GITHUB_WORKSPACE}/dist/bin/tailcat" ./cmd/tailcat
+          mipsel-linux-gnu-strip --strip-unneeded "${GITHUB_WORKSPACE}/dist/bin/tailcat" || true
+          ls -l "${GITHUB_WORKSPACE}/dist/bin/tailcat"
+          git rev-parse HEAD > "${GITHUB_WORKSPACE}/dist/TAILCAT_COMMIT"
+          cat "${GITHUB_WORKSPACE}/dist/TAILCAT_COMMIT"
+
       - name: Package payload
         run: |
           set -eux
           cd "$GITHUB_WORKSPACE"
-          # `tailscale` is the same binary as `tailscaled` (argv[0] dispatch),
-          # exactly as the OpenWrt package does it.
-          ln -sf tailscaled dist/bin/tailscale
-          # Sanity-check the cross build. NOTE: these are MIPS binaries and
+
+          # Sanity-check the cross builds. NOTE: these are MIPS binaries and
           # cannot be executed on the x86 runner.
-          file dist/bin/tailscaled dist/bin/frpc
-          for f in tailscaled frpc; do
+          file dist/bin/tailcat dist/bin/frpc dist/bin/tailscaled
+          for f in tailcat frpc tailscaled; do
             file "dist/bin/$f" | grep -q 'MIPS' || { echo "ERROR: $f is not a MIPS binary"; exit 1; }
           done
-          # Record sizes for the flash/RAM budget.
-          ls -l dist/bin | tee dist/MANIFEST.txt
-          tar -czf payload-mipsel_24kc.tar.gz -C dist bin
-          ls -l payload-mipsel_24kc.tar.gz
-          sha256sum payload-mipsel_24kc.tar.gz | tee payload.sha256
 
-      - name: Show payload summary
+          rm -rf pkg-default pkg-tailscale
+          mkdir -p pkg-default/bin pkg-tailscale/bin
+
+          # default flavour: tailcat + frpc
+          cp dist/bin/tailcat dist/bin/frpc pkg-default/bin/
+
+          # optional flavour: the classic tailscale daemon; `tailscale` is the
+          # same binary as `tailscaled` (argv[0] dispatch), exactly as the
+          # OpenWrt package does it.
+          cp dist/bin/tailscaled pkg-tailscale/bin/
+          ln -sf tailscaled pkg-tailscale/bin/tailscale
+
+          {
+            echo "tailcat commit : $(cat dist/TAILCAT_COMMIT 2>/dev/null || echo unknown)"
+            echo
+            echo "flavour default  (payload-mipsel_24kc.tar.gz): tailcat + frpc"
+            ls -l pkg-default/bin
+            echo
+            echo "flavour optional (payload-tailscale-mipsel_24kc.tar.gz): tailscaled + tailscale CLI"
+            ls -l pkg-tailscale/bin
+          } | tee dist/MANIFEST.txt
+
+          tar -czf payload-mipsel_24kc.tar.gz           -C pkg-default   bin
+          tar -czf payload-tailscale-mipsel_24kc.tar.gz -C pkg-tailscale bin
+          ls -l payload-*.tar.gz
+          sha256sum payload-mipsel_24kc.tar.gz           | tee payload.sha256
+          sha256sum payload-tailscale-mipsel_24kc.tar.gz > payload.tailscale.sha256
+          cat payload.tailscale.sha256
+
+      - name: Payload size budget
         run: |
           set -eux
+          cd "$GITHUB_WORKSPACE"
+          echo "=== default tarball ==="
           tar -tzvf payload-mipsel_24kc.tar.gz
-          echo "--- extracted size ---"
-          tar -xzf payload-mipsel_24kc.tar.gz -C /tmp --transform 's,^bin,payloadcheck,'
-          du -sh /tmp/payloadcheck || true
-          du -sb /tmp/payloadcheck || true
+          echo "=== optional tarball ==="
+          tar -tzvf payload-tailscale-mipsel_24kc.tar.gz
+          echo
+          echo "tmpfs on the device is 60 MB; the default flavour must fit with room"
+          echo "for the Go runtimes. Measured installed sizes:"
+          du -sb pkg-default/bin pkg-tailscale/bin
 
       - name: Publish payload to the raw branch
         run: |
@@ -130,6 +200,7 @@ jobs:
           rm -rf pub
           mkdir pub
           cp payload-mipsel_24kc.tar.gz payload.sha256 pub/
+          cp payload-tailscale-mipsel_24kc.tar.gz payload.tailscale.sha256 pub/
           cp "$GITHUB_WORKSPACE/dist/MANIFEST.txt" pub/ 2>/dev/null || true
           cd pub
           git init -q -b payload
@@ -148,6 +219,8 @@ jobs:
           path: |
             payload-mipsel_24kc.tar.gz
             payload.sha256
+            payload-tailscale-mipsel_24kc.tar.gz
+            payload.tailscale.sha256
 
   # ------------------------------------------------------------------ image --
   # Build the flashable sysupgrade image with the official ImageBuilder.

@@ -2,13 +2,26 @@
 #
 # Installed into tmpfs (/tmp/opt) by /usr/sbin/mt300n-install.
 # The device only has 16 MB of flash, so these programs are NOT flashed;
-# they are fetched from this repository's latest release on every boot.
+# they are fetched from this repository's `payload` branch on every boot.
 #
-# Format:  <name>  <release-asset>  <path-inside-archive>  [required]
+# Format:  <name>  <asset>  <path-inside-archive>  [required]
 #   required=yes  -> installation fails if the program is missing
 #   required=no   -> installation still succeeds (LED still goes solid)
+#
+# ---------------------------------------------------------------------------
+# default flavour: tailcat + frpc   (~47 MB installed, tmpfs is 60 MB)
+# ---------------------------------------------------------------------------
+# tailcat: netcat over Tailscale's data plane, without the control plane.
+# No Tailscale account, no kernel TUN device, no root, userspace only.
+tailcat       payload-mipsel_24kc.tar.gz   bin/tailcat    yes
+frpc          payload-mipsel_24kc.tar.gz   bin/frpc       yes
 
-# name        asset                        path-in-archive   required
-tailscaled    payload-mipsel_24kc.tar.gz   bin/tailscaled    yes
-tailscale     payload-mipsel_24kc.tar.gz   bin/tailscale     yes
-frpc          payload-mipsel_24kc.tar.gz   bin/frpc          yes
+# ---------------------------------------------------------------------------
+# optional flavour: the classic Tailscale client + daemon
+# ---------------------------------------------------------------------------
+# Uncomment to use tailscaled instead of (or alongside) tailcat.
+# NOTE: /tmp is a 60 MB tmpfs, so tailcat AND tailscaled do not both fit.
+# Comment out the tailcat line above before enabling these.
+#
+# tailscaled  payload-tailscale-mipsel_24kc.tar.gz  bin/tailscaled  no
+# tailscale   payload-tailscale-mipsel_24kc.tar.gz  bin/tailscale   no
