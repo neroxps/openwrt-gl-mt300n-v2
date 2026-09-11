@@ -1,0 +1,14 @@
+# Runtime payload for the GL.iNet GL-MT300N-V2 (ramips/mt76x8, mipsel_24kc).
+#
+# Installed into tmpfs (/tmp/opt) by /usr/sbin/mt300n-install.
+# The device only has 16 MB of flash, so these programs are NOT flashed;
+# they are fetched from this repository's latest release on every boot.
+#
+# Format:  <name>  <release-asset>  <path-inside-archive>  [required]
+#   required=yes  -> installation fails if the program is missing
+#   required=no   -> installation still succeeds (LED still goes solid)
+
+# name        asset                        path-in-archive   required
+tailscaled    payload-mipsel_24kc.tar.gz   bin/tailscaled    yes
+tailscale     payload-mipsel_24kc.tar.gz   bin/tailscale     yes
+frpc          payload-mipsel_24kc.tar.gz   bin/frpc          yes

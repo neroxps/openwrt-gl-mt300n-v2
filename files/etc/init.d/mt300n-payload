@@ -1,0 +1,16 @@
+#!/bin/sh /etc/rc.common
+# Re-installs the /tmp payload after every boot, once the WAN has internet.
+# The payload cannot live in flash (16 MB) so tmpfs is repopulated on demand.
+
+START=96
+STOP=05
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/sbin/mt300n-autorun
+	procd_set_param respawn 3600 10 3
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}

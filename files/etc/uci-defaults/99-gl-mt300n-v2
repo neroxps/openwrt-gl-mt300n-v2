@@ -1,0 +1,42 @@
+#!/bin/sh
+# First-boot defaults for the GL.iNet GL-MT300N-V2 image.
+# Runs once, from /etc/uci-defaults, then removes itself automatically.
+
+. /lib/functions.sh
+
+# --- hostname ---------------------------------------------------------------
+uci -q batch <<-EOF
+	set system.@system[0].hostname='GL-MT300N-V2'
+	set system.@system[0].timezone='CST-8'
+	set system.@system[0].zonename='Asia/Shanghai'
+	commit system
+EOF
+
+# --- LEDs -------------------------------------------------------------------
+# The stock configuration binds green:wan to the switch trigger. The status
+# daemon owns that LED instead, so drop the conflicting entries. The power LED
+# keeps the kernel default (steady on) and the wifi LED keeps its netdev trigger.
+uci -q delete system.led_wan
+uci -q delete system.led_power
+uci -q commit system
+
+# --- WAN --------------------------------------------------------------------
+# Default is already dhcp; make it explicit and keep LAN on 192.168.1.1.
+if uci -q get network.wan >/dev/null; then
+	uci -q set network.wan.proto='dhcp'
+	uci -q commit network
+fi
+
+# --- SSH --------------------------------------------------------------------
+# Keep password auth enabled so a fresh image is reachable after a -n flash.
+uci -q batch <<-EOF
+	set dropbear.@dropbear[0].PasswordAuth='on'
+	set dropbear.@dropbear[0].RootPasswordAuth='on'
+	commit dropbear
+EOF
+
+# --- services ---------------------------------------------------------------
+/etc/init.d/glstatus enable
+/etc/init.d/mt300n-payload enable
+
+exit 0

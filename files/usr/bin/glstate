@@ -1,0 +1,57 @@
+#!/bin/sh
+# glstate - drive the status LEDs of the GL.iNet GL-MT300N-V2.
+#
+# Physical LED layout (confirmed against the upstream device tree
+# target/linux/ramips/dts/mt7628an_glinet_gl-mt300n-v2.dts, OpenWrt 25.12.5):
+#
+#   green:power  gpio 42  active-low   -> top    LED (power)
+#   green:wan    gpio 43  active-low   -> middle LED (status, used here)
+#   red:wlan     gpio 44  active-low   -> wifi   LED
+#
+# The middle LED is used as the state indicator:
+#   offline      fast blink    (no usable internet on the WAN)
+#   installing   faster blink  (payload download / install in progress)
+#   error        very fast     (install failed)
+#   online/ready steady on     (internet up / tools loaded)
+#
+# Blinking is done with the kernel `timer` trigger, so no userspace
+# process has to toggle a GPIO.
+
+LED="${GLSTATE_LED:-/sys/class/leds/green:wan}"
+
+set_trigger() {
+	[ -w "$LED/trigger" ] || return 1
+	printf '%s' "$1" > "$LED/trigger" 2>/dev/null
+}
+
+blink() {
+	# $1 = on ms, $2 = off ms
+	set_trigger timer || return 1
+	printf '%s' "$1" > "$LED/delay_on"  2>/dev/null
+	printf '%s' "$2" > "$LED/delay_off" 2>/dev/null
+}
+
+solid() {
+	set_trigger none || return 1
+	printf '1' > "$LED/brightness" 2>/dev/null
+}
+
+off() {
+	set_trigger none || return 1
+	printf '0' > "$LED/brightness" 2>/dev/null
+}
+
+[ -d "$LED" ] || { logger -t glstate "LED $LED not found"; exit 1; }
+
+case "$1" in
+	offline)    blink 125 125 ;;
+	installing) blink 80  80  ;;
+	error)      blink 60  60  ;;
+	online)     solid ;;
+	ready)      solid ;;
+	off)        off ;;
+	*)
+		echo "usage: glstate {offline|installing|error|online|ready|off}" >&2
+		exit 1
+		;;
+esac

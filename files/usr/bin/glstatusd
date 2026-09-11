@@ -1,0 +1,68 @@
+#!/bin/sh
+# glstatusd - keep the middle LED of the GL-MT300N-V2 in sync with the
+# router state. See /usr/bin/glstate for the LED map.
+#
+# States, highest priority first:
+#   error       /tmp/.mt300n-error      -> install failed
+#   installing  /tmp/.mt300n-installing -> download/install in progress
+#   ready       /tmp/.mt300n-ready AND tailscaled running
+#   online      a default route exists and a probe host answers
+#   offline     everything else (WAN has no usable internet)
+
+FLAG_INSTALL=/tmp/.mt300n-installing
+FLAG_ERROR=/tmp/.mt300n-error
+FLAG_READY=/tmp/.mt300n-ready
+
+PROBE_PRIMARY="${GLSTATUS_PROBE:-223.5.5.5}"
+PROBE_FALLBACK="1.1.1.1"
+
+CUR=""
+
+apply() {
+	[ "$CUR" = "$1" ] && return 0
+	CUR="$1"
+	/usr/bin/glstate "$1"
+	logger -t glstatus "state=$1"
+}
+
+# A probe host must both be routed and answer.
+reachable() {
+	ip route 2>/dev/null | grep -q '^default' || return 1
+	ping -c 1 -W 2 "$PROBE_PRIMARY" >/dev/null 2>&1 && return 0
+	ping -c 1 -W 2 "$PROBE_FALLBACK" >/dev/null 2>&1 && return 0
+	return 1
+}
+
+ready() {
+	[ -f "$FLAG_READY" ] || return 1
+	[ -x /tmp/opt/bin/tailscaled ] || return 1
+	pgrep -f 'tailscaled' >/dev/null 2>&1 || return 1
+	return 0
+}
+
+state() {
+	[ -f "$FLAG_ERROR" ]     && { echo error;      return; }
+	[ -f "$FLAG_INSTALL" ]   && { echo installing; return; }
+	ready                    && { echo ready;      return; }
+	reachable                && { echo online;     return; }
+	echo offline
+}
+
+# Wait until the LED class exists (kmod-leds-gpio may still be loading).
+i=0
+while [ ! -d /sys/class/leds/green:wan ] && [ $i -lt 60 ]; do
+	i=$((i + 1))
+	sleep 1
+done
+
+logger -t glstatus "started"
+apply offline
+
+while :; do
+	s=$(state)
+	apply "$s"
+	case "$s" in
+		offline|installing|error) sleep 3 ;;
+		*)                        sleep 10 ;;
+	esac
+done

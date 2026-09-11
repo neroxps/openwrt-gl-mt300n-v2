@@ -1,0 +1,36 @@
+#!/bin/sh
+# mt300n-autorun - wait for internet, then run the payload installer once.
+# Started by /etc/init.d/mt300n-payload at every boot: the payload lives in
+# tmpfs, so it has to be re-fetched after a reboot.
+
+READY=/tmp/.mt300n-ready
+INSTALL=/usr/sbin/mt300n-install
+
+log() { logger -t mt300n-autorun "$*"; }
+
+# Already installed and running? nothing to do.
+if [ -f "$READY" ] && [ -x /tmp/opt/bin/tailscaled ] && pgrep -f tailscaled >/dev/null 2>&1; then
+	log "payload already present"
+	exit 0
+fi
+
+reachable() {
+	ip route 2>/dev/null | grep -q '^default' || return 1
+	ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 && return 0
+	ping -c 1 -W 2 1.1.1.1  >/dev/null 2>&1 && return 0
+	return 1
+}
+
+log "waiting for internet (WAN dhcp)"
+i=0
+while [ "$i" -lt 180 ]; do
+	if reachable; then
+		log "internet is up after $((i * 5))s"
+		exec "$INSTALL"
+	fi
+	i=$((i + 1))
+	sleep 5
+done
+
+log "no internet after 900s - leaving LED in the offline state"
+exit 1

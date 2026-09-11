@@ -1,0 +1,217 @@
+name: build-gl-mt300n-v2
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: 'OpenWrt release to build against'
+        required: false
+        default: '25.12.5'
+
+permissions:
+  contents: write
+
+env:
+  OPENWRT_VERSION: ${{ github.event.inputs.openwrt_version || '25.12.5' }}
+  TARGET: ramips
+  SUBTARGET: mt76x8
+  PROFILE: glinet_gl-mt300n-v2
+  TAILSCALE_VERSION: v1.98.3
+  FRP_VERSION: v0.66.0
+
+jobs:
+  # ---------------------------------------------------------------- payload --
+  # Compile the runtime payload (tailscale + frpc) for mipsel_24kc/softfloat.
+  # Tailscale is built exactly the way OpenWrt does it: a single `tailscaled`
+  # binary that also acts as the CLI (symlinked to `tailscale`) plus the
+  # feature-omitting build tags, which keeps it small enough for 16 MB flash.
+  payload:
+    name: build runtime payload
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq binutils-mipsel-linux-gnu
+
+      - name: Fetch tailscale source
+        uses: actions/checkout@v5
+        with:
+          repository: tailscale/tailscale
+          ref: ${{ env.TAILSCALE_VERSION }}
+          path: src/tailscale
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: src/tailscale/go.mod
+          cache-dependency-path: src/tailscale/go.sum
+
+      - name: Build tailscaled (CLI included)
+        working-directory: src/tailscale
+        env:
+          GOOS: linux
+          GOARCH: mipsle
+          GOMIPS: softfloat
+          CGO_ENABLED: '0'
+        run: |
+          set -eux
+          TAGS="ts_include_cli,ts_omit_aws,ts_omit_bird,ts_omit_completion,ts_omit_kube,ts_omit_systray,ts_omit_taildrop,ts_omit_tap,ts_omit_tpm"
+          LDFLAGS="-s -w -buildid= \
+            -X tailscale.com/version.longStamp=${TAILSCALE_VERSION}-openwrt \
+            -X tailscale.com/version.shortStamp=${TAILSCALE_VERSION}"
+          mkdir -p "${GITHUB_WORKSPACE}/dist/bin"
+          go build -trimpath -tags "$TAGS" -ldflags "$LDFLAGS" \
+            -o "${GITHUB_WORKSPACE}/dist/bin/tailscaled" ./cmd/tailscaled
+          mipsel-linux-gnu-strip --strip-unneeded "${GITHUB_WORKSPACE}/dist/bin/tailscaled" || true
+          "${GITHUB_WORKSPACE}/dist/bin/tailscaled" --version 2>&1 | head -3 || true
+
+      - name: Fetch frp source
+        uses: actions/checkout@v5
+        with:
+          repository: fatedier/frp
+          ref: ${{ env.FRP_VERSION }}
+          path: src/frp
+
+      - name: Build frpc
+        working-directory: src/frp
+        env:
+          GOOS: linux
+          GOARCH: mipsle
+          GOMIPS: softfloat
+          CGO_ENABLED: '0'
+        run: |
+          set -eux
+          go build -trimpath -ldflags "-s -w -buildid=" -o "${GITHUB_WORKSPACE}/dist/bin/frpc" ./cmd/frpc
+          mipsel-linux-gnu-strip --strip-unneeded "${GITHUB_WORKSPACE}/dist/bin/frpc" || true
+
+      - name: Package payload
+        run: |
+          set -eux
+          cd dist
+          mkdir -p bin
+          # `tailscale` is the same binary as `tailscaled` (argv[0] dispatch).
+          ln -sf tailscaled bin/tailscale
+          "$GITHUB_WORKSPACE/dist/bin/tailscaled" --version > bin/VERSION-tailscale 2>&1 || true
+          "$GITHUB_WORKSPACE/dist/bin/frpc" --version > bin/VERSION-frpc 2>&1 || true
+          # Record sizes for the flash/RAM budget.
+          ls -l bin > MANIFEST.txt
+          cat MANIFEST.txt
+          tar -czf "$GITHUB_WORKSPACE/payload-mipsel_24kc.tar.gz" -C dist bin
+          ls -l "$GITHUB_WORKSPACE/payload-mipsel_24kc.tar.gz"
+          sha256sum "$GITHUB_WORKSPACE/payload-mipsel_24kc.tar.gz" | tee payload.sha256
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: payload
+          path: |
+            payload-mipsel_24kc.tar.gz
+            payload.sha256
+
+  # ------------------------------------------------------------------ image --
+  # Build the flashable sysupgrade image with the official ImageBuilder.
+  image:
+    name: build openwrt image
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download ImageBuilder
+        run: |
+          set -eux
+          BASE="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}/${SUBTARGET}"
+          IB="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}.Linux-x86_64.tar.zst"
+          curl -fsSL -o "$IB" "$BASE/$IB"
+          curl -fsSL -o sha256sums "$BASE/sha256sums"
+          grep " ${IB}\$" sha256sums | sha256sum -c -
+          tar --zstd -xf "$IB"
+          echo "IBDIR=$PWD/openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET}-${SUBTARGET}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        run: |
+          set -eux
+          cd "$IBDIR"
+          # Extra packages on top of the target defaults:
+          #   kmod-wireguard / wireguard-tools / luci-proto-wireguard -> WireGuard
+          #   kmod-tun                                               -> tailscaled userspace
+          #   ca-bundle                                              -> HTTPS for GitHub
+          #   luci                                                   -> web UI
+          PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci"
+          mkdir -p files
+          cp -a "$GITHUB_WORKSPACE/files/." files/
+          # Optional: bake an SSH public key so the flashed router is reachable
+          # even right after a `sysupgrade -n` (config reset).
+          if [ -n "${{ secrets.SSH_AUTHORIZED_KEY }}" ]; then
+            mkdir -p files/etc/dropbear
+            printf '%s\n' "${{ secrets.SSH_AUTHORIZED_KEY }}" > files/etc/dropbear/authorized_keys
+            chmod 600 files/etc/dropbear/authorized_keys
+            echo "authorized_keys injected"
+          else
+            echo "no SSH_AUTHORIZED_KEY secret - relying on empty root password"
+          fi
+          make image \
+            PROFILE="${PROFILE}" \
+            PACKAGES="$PKGS" \
+            FILES="files" \
+            -j"$(nproc)"
+          ls -l bin/targets/${TARGET}/${SUBTARGET}/
+
+      - name: Collect artefacts
+        run: |
+          set -eux
+          mkdir -p out
+          cd "$IBDIR/bin/targets/${TARGET}/${SUBTARGET}"
+          cp openwrt-*-${PROFILE}-squashfs-sysupgrade.bin "$GITHUB_WORKSPACE/out/"
+          cp openwrt-*-${PROFILE}-initramfs-kernel.bin  "$GITHUB_WORKSPACE/out/" || true
+          cp openwrt-*.manifest "$GITHUB_WORKSPACE/out/${PROFILE}.manifest" || true
+          cd "$GITHUB_WORKSPACE/out"
+          ls -l
+          sha256sum *.bin > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: firmware
+          path: out/*
+
+  # ---------------------------------------------------------------- release --
+  release:
+    name: publish release
+    needs: [ payload, image ]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          path: artifacts
+
+      - name: Flatten
+        run: |
+          set -eux
+          mkdir -p rel
+          find artifacts -type f -exec cp {} rel/ \;
+          ls -l rel/
+
+      - name: Tag
+        id: tag
+        run: |
+          echo "tag=v${OPENWRT_VERSION}-$(date -u +%Y%m%d%H%M%S)" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: "OpenWrt ${{ env.OPENWRT_VERSION }} for GL-MT300N-V2"
+          body: |
+            Auto-built OpenWrt ${{ env.OPENWRT_VERSION }} image for the
+            GL.iNet GL-MT300N-V2 (ramips/mt76x8) plus the mipsel_24kc
+            runtime payload (tailscale, frpc).
+
+            * firmware: `*squashfs-sysupgrade.bin` — flash with `sysupgrade`
+            * payload:  `payload-mipsel_24kc.tar.gz` — extracted to `/tmp` by
+              `/usr/sbin/mt300n-install` on the device
+          files: rel/*
+          fail_on_unmatched_files: false

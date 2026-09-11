@@ -1,0 +1,72 @@
+#!/bin/sh
+# mt300n-install - bootstrap installer.
+#
+# Pulls install.sh and packages.txt from the GitHub software repository and
+# runs it. Everything is fetched through a GitHub proxy (default
+# https://ghfast.top) because raw github.com is unreliable on many networks.
+#
+# Overridable environment:
+#   REPO=owner/name   PROXY=https://ghfast.top   REF=<tag or branch>
+
+REPO="${REPO:-neroxps/openwrt-gl-mt300n-v2}"
+PROXY="${PROXY:-https://ghfast.top}"
+REF="${REF:-main}"
+RAW="${PROXY}/https://raw.githubusercontent.com/${REPO}/${REF}"
+
+WORK=/tmp/mt300n-install
+FLAG=/tmp/.mt300n-installing
+ERR=/tmp/.mt300n-error
+
+mkdir -p "$WORK"
+rm -f "$ERR"
+: > "$FLAG"
+/usr/bin/glstate installing
+
+log() { logger -t mt300n-install "$*"; echo "$*"; }
+
+fetch() {
+	# $1 = url, $2 = output file
+	if uclient-fetch -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+		return 0
+	fi
+	# some builds only ship wget
+	if wget -q -O "$2" "$1" 2>/dev/null && [ -s "$2" ]; then
+		return 0
+	fi
+	return 1
+}
+
+log "repository : $REPO@$REF"
+log "proxy      : $PROXY"
+
+if ! fetch "${RAW}/payload/packages.txt" "$WORK/packages.txt"; then
+	log "ERROR: cannot fetch packages.txt from ${RAW}/payload/packages.txt"
+	touch "$ERR"
+	rm -f "$FLAG"
+	/usr/bin/glstate error
+	exit 1
+fi
+log "package list:"
+cat "$WORK/packages.txt"
+
+if ! fetch "${RAW}/payload/install.sh" "$WORK/install.sh"; then
+	log "ERROR: cannot fetch install.sh from ${RAW}/payload/install.sh"
+	touch "$ERR"
+	rm -f "$FLAG"
+	/usr/bin/glstate error
+	exit 1
+fi
+
+REPO="$REPO" PROXY="$PROXY" REF="$REF" \
+	sh "$WORK/install.sh" "$WORK/packages.txt"
+rc=$?
+
+rm -f "$FLAG"
+if [ "$rc" -ne 0 ]; then
+	log "install failed (rc=$rc)"
+	touch "$ERR"
+	/usr/bin/glstate error
+else
+	log "install completed"
+fi
+exit "$rc"
