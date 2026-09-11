@@ -77,6 +77,82 @@ function kvRow(label, value) {
 	return [ label, (value === '' || value == null) ? E('em', [ _('none') ]) : value ];
 }
 
+/*
+ * The exact client-side commands for the current preset.
+ *
+ * Remembering tailcat's syntax is the annoying part of using it, so the page
+ * spells out what to run - and what to open - for whatever is being exposed.
+ */
+function clientHints(preset, addr, customPorts) {
+	var A = addr || '<tailcat-address>';
+
+	if (!addr)
+		return [ _('Generate the address first (press "Restart" or "New key"), then the client commands appear here.') ];
+
+	var cmd = function (text) {
+		return E('p', { 'style': 'margin:.15em 0' }, [ E('code', [ text ]) ]);
+	};
+
+	var out = [];
+
+	switch (preset) {
+	case 'ssh':
+	case 'ssh_web':
+		out.push(E('p', [ _('On the machine you are connecting from:') ]));
+		out.push(cmd('tailcat ssh ' + A));
+		out.push(cmd(_('to reach the router\'s own SSH (port 22) - no port forwarding needed anywhere.')));
+		out.push(cmd('tailcat forward ' + A + ' 127.0.0.1:8080:80'));
+		out.push(cmd(_('then open http://127.0.0.1:8080/ for this web UI.')));
+		break;
+
+	case 'web':
+		out.push(E('p', [ _('On the machine you are connecting from:') ]));
+		out.push(cmd('tailcat forward ' + A + ' 127.0.0.1:8080:80'));
+		out.push(cmd(_('then open http://127.0.0.1:8080/ for this web UI.')));
+		break;
+
+	case 'tailcat_ssh':
+	case 'no_auth_ssh':
+		out.push(E('p', [ _('On the machine you are connecting from:') ]));
+		out.push(cmd('tailcat ssh ' + A));
+		out.push(cmd(_('tailcat provides this SSH server itself; it does not use the router\'s dropbear.')));
+		break;
+
+	case 'files':
+		out.push(E('p', [ _('On the machine you are connecting from:') ]));
+		out.push(cmd('tailcat ls -l ' + A));
+		out.push(cmd('tailcat cp file.txt ' + A + ':'));
+		out.push(cmd('tailcat cp ' + A + ':file.txt .'));
+		break;
+
+	case 'exit_node':
+		out.push(E('p', [ _('The server can reach this router\'s whole LAN, so forward any address:') ]));
+		out.push(cmd('tailcat forward ' + A + ' 13306:192.168.1.50:3306'));
+		out.push(cmd('tailcat ssh -p 192.168.1.50:22 ' + A));
+		break;
+
+	case 'all':
+		out.push(E('p', [ _('Every port is exposed, so any port can be dialled directly:') ]));
+		out.push(cmd('tailcat ' + A + ' 80'));
+		out.push(cmd('tailcat ssh ' + A));
+		break;
+
+	case 'custom':
+		out.push(E('p', [ _('Configured ports: ') + (customPorts || _('none')) ]));
+		out.push(cmd('tailcat ' + A + ' <port>'));
+		out.push(cmd('tailcat forward ' + A + ' <localPort>:<remotePort>'));
+		break;
+
+	default:
+		out.push(cmd('tailcat ' + A + ' <port>'));
+	}
+
+	out.push(E('p', { 'class': 'cbi-section-descr' },
+		[ _('The client is the same tailcat binary; get it from https://github.com/tailscale/tailcat/releases (or "tailcat readme" on the router shows the full manual).') ]));
+
+	return out;
+}
+
 return view.extend({
 
 	load: function () {
@@ -172,7 +248,9 @@ return view.extend({
 						});
 					})
 				}, [ _('Test tunnel') ])
-			])
+			]),
+			E('h4', [ _('How to connect from a client') ]),
+			E('div', {}, clientHints(st.preset, addr, st.custom_ports))
 		]);
 
 		/* ------------------------------------------------------------ form */
