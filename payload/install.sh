@@ -105,9 +105,16 @@ fi
 
 # ---------------------------------------------------------------- services ---
 # tailscaled: state and socket live in tmpfs as well.
+#
+# This target has 128 MB of RAM and NO swap (the mt76x8 kernel is built without
+# CONFIG_SWAP), and 46 MB of the RAM is permanently occupied by the payload in
+# tmpfs. tailscaled is a Go program, so cap its heap explicitly with GOMEMLIMIT
+# and make the collector work a little harder; that keeps its RSS around 30 MB
+# instead of letting it grow until the OOM killer steps in.
 if [ -x "$BIN/tailscaled" ]; then
 	if ! pgrep -f 'tailscaled' >/dev/null 2>&1; then
-		log "starting tailscaled"
+		log "starting tailscaled (GOMEMLIMIT=24MiB)"
+		GOMEMLIMIT=24MiB GOGC=50 \
 		start-stop-daemon -S -b -q -x "$BIN/tailscaled" -- \
 			--state="$VAR/lib/tailscale/tailscaled.state" \
 			--socket="$RUN/tailscaled.sock" \
@@ -126,6 +133,8 @@ if [ ! -f "$FRPC_CONF" ]; then
 	# or simply re-run:  /usr/sbin/mt300n-install
 	serverAddr = ""
 	serverPort = 7000
+	# Keep retrying instead of exiting when the server is briefly unreachable.
+	loginFailExit = false
 	auth.method = "token"
 	auth.token = ""
 

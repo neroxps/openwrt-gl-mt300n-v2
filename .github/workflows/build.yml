@@ -183,9 +183,10 @@ jobs:
           #   kmod-tun                                               -> tailscaled userspace
           #   ca-bundle                                              -> HTTPS for GitHub
           #   luci                                                   -> web UI
-          #   zram-swap                                              -> headroom for the
-          #     46 MB payload that lives in tmpfs on a 128 MB box
-          PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci zram-swap"
+          # NOTE: zram-swap is deliberately NOT installed. The ramips/mt76x8
+          # kernel is built without CONFIG_SWAP (/proc/swaps does not exist), so
+          # zram cannot provide swap on this device - it would be dead weight.
+          PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci"
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/files/." files/
           # The executable bit is not reliably preserved through git on Windows
