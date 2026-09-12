@@ -12,3 +12,8 @@
 *.png   binary
 *.jpg   binary
 *.webp  binary
+
+# The frp v3 client for mipsel_24kc, vendored because the device fetches the
+# payload anonymously and the payload branch is force-replaced by CI. Keep it
+# out of every text filter and out of diffs.
+payload/frpc-mipsel-v3  binary -diff -text

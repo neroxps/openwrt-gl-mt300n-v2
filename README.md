@@ -101,27 +101,52 @@ connections (`frpc status -c /tmp/opt/etc/frpc.toml` prints what it got).
 
 #### Which frpc the device runs
 
-The payload carries the **frp v3 client** — `neroxps/frp-v3`, a private fork of
-frp v0.71.0 whose only two changes are the websocket path (`/~!frp` →
-`/api/v1/stream`) and the wire-protocol magic (the literal `FRP…` header → nine
-zero bytes). Upstream `frpc` over `tcp + tls` still works against it; `wss` does
-not, because that path must match on both ends.
+The payload carries `frpc` **0.71.0-v3** from `neroxps/frp-v3`, the private fork
+of frp v0.71.0 that is meant to change exactly two things: the websocket path
+(`/~!frp` → `/api/v1/stream`) and the wire-protocol magic (the literal `FRP…`
+header → nine zero bytes).
+
+**The v3.0.0 artifacts do not actually carry either change.** Measured on
+2026-09-12, not assumed:
+
+| Check | Result |
+| --- | --- |
+| `src/pkg/util/net/websocket.go` in the fork | `FrpWebsocketPath = "/~!frp"` — the upstream value |
+| `src/pkg/proto/wire/wire.go` in the fork | `MagicV2 = "FRP\x00\x02\r\n"` — the upstream value |
+| `strings` on `…_linux_mipsle` and `…_linux_amd64` | `/~!frp` present, `/api/v1/stream` absent, upstream magic present |
+| `frpc_v3_0.71.0-v3_linux_mipsle -v` | `0.71.0-v3` |
+
+So the shipped client is upstream frp v0.71.0 with a `-v3` version stamp:
+`patches/frp-v3.patch` documents the intent, but it was never applied to the
+`src/` tree the fork's own CI compiles. The client still works over
+`tcp + tls`, and 0.71.0 is five releases newer than the 0.66.0 this payload used
+to carry — it includes the v0.68.1 `type = "http"` proxy-authentication bypass
+fix and the v0.71.0 `customDomains` validation fix — but the anti-detection
+hardening is not in the binary. `wss` against a *patched* `frps` would 404 on
+the path, and the `FRP` brand string is still on the wire. The payload job prints
+the hardening state of every vendored binary and raises a warning when it is
+missing, so this cannot go unnoticed.
 
 | | |
 | --- | --- |
-| Where it comes from | CI clones the private fork at `FRP_V3_VERSION` and cross-compiles it |
-| Secret it needs | `FRP_V3_TOKEN` — a token with **read** access to `neroxps/frp-v3` |
-| Without the secret | the job warns and falls back to upstream `FRP_VERSION`, and the payload says so |
-| How to see which one arrived | `mt300n-ctl frpc status` → `version=0.71.0-v3`; LuCI shows it next to *Installed*; `/tmp/opt/INSTALLED.txt` records it on the device; `MANIFEST.txt` and `FRPC_FLAVOUR` on the payload branch record it per build |
+| Where it comes from | `payload/frpc-mipsel-v3`, vendored in this repository |
+| Why vendored | the payload branch is force-replaced on every CI run and the device downloads it anonymously, so the client must be committed somewhere public; the fork's own README also forbids putting its token anywhere but the deployment machine, which rules out a CI secret |
+| Updating it | `tools/fetch-frpc-v3.ps1 -Tag v3.0.1` on the deployment machine, then commit — the script verifies size and sha256 from the release API and reports the hardening state |
+| What CI checks | sha256 against `payload/frpc-mipsel-v3.sha256`, MIPS ELF, the `0.71.0-v3` stamp (hard failures); the two hardening markers (warning) |
+| How to see what arrived | `mt300n-ctl frpc status` → `version=0.71.0-v3`; LuCI next to *Installed*; `/tmp/opt/INSTALLED.txt`; `MANIFEST.txt` and `FRPC_FLAVOUR` on the payload branch |
 
-The payload branch is **force-replaced** on every CI run, so nothing placed there
-by hand survives; the client has to come from the workflow.
+If the fork is ever released with the patch actually applied, both ends have to
+move together: the vendored binary here and the `frps` that terminates the
+tunnel.
 
 Runtime configuration notes for this client:
 
-* `transport.wireProtocol = "v2"` is what makes the patched magic matter. It is
-  set on the device and verified: the v2 login succeeds against the v3 `frps`,
-  while an upstream client cannot complete that handshake.
+* `transport.wireProtocol = "v2"` was tried on the device and then **removed**.
+  The wire layer compares the magic on read (`buf[i] != MagicV2[i]`), so with
+  both ends unpatched v2 buys nothing — the brand string is still sent — while
+  coupling the router to the server's build: rebuilding either end with the
+  patch makes v2 stop completing the handshake. `v1` is the default and ignores
+  the magic. Enable v2 only when both ends verifiably carry the patch.
 * `transport.tls.disableCustomTLSFirstByte = true` avoids the non-standard
   `0x17` first byte; `transport.tls.serverName` keeps a real SNI;
   `transport.tls.trustedCaFile` pins the server CA (needs the `ca.crt` on the

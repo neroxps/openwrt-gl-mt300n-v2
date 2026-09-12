@@ -21,12 +21,8 @@ env:
   SUBTARGET: mt76x8
   PROFILE: glinet_gl-mt300n-v2
   TAILSCALE_VERSION: v1.98.3
-  # Upstream frp: the fallback when the private v3 fork is not available.
+  # Upstream frp: only used if the vendored frp v3 client is missing.
   FRP_VERSION: v0.66.0
-  # The private hardening fork of frp v0.71.0 the device actually runs.
-  FRP_V3_REPO: neroxps/frp-v3
-  FRP_V3_VERSION: v3.0.0
-  FRP_V3_VERSION_UPSTREAM: '0.71.0'
   # tailcat: netcat over Tailscale's data plane, no control plane / no account.
   # https://github.com/tailscale/tailcat
   TAILCAT_REF: main
@@ -109,75 +105,88 @@ jobs:
           mipsel-linux-gnu-strip --strip-unneeded "${GITHUB_WORKSPACE}/dist/bin/tailscaled" || true
           "${GITHUB_WORKSPACE}/dist/bin/tailscaled" --version 2>&1 | head -3 || true
 
-      # The device runs the frp v3 client: a private fork of frp v0.71.0 whose
-      # only two changes are the websocket path and the wire-protocol magic.
-      # Feasibility check (measured on the router): the fork's frpc logs in over
+      # The device runs the frp v3 client: a fork of frp v0.71.0 whose only two
+      # changes are the websocket path and the wire-protocol magic. Feasibility
+      # check (measured on the router): the fork's frpc logs in over
       # `transport.wireProtocol = "v2"` against the frps that the fork ships,
       # while upstream frpc cannot - so the fork is what the server expects.
       #
-      # The fork is private, so this clone only works when the FRP_V3_TOKEN
-      # secret exists. Without it the job logs a warning and the payload carries
-      # upstream frpc; the flavour is written to dist/FRPC_FLAVOUR, published in
-      # MANIFEST.txt on the payload branch, and visible on the device as
-      # `mt300n-ctl frpc status | grep version=`, so a fallback is never silent.
-      - name: Fetch frp v3 source (private fork)
-        id: frp_v3
-        continue-on-error: true
-        env:
-          FRP_V3_TOKEN: ${{ secrets.FRP_V3_TOKEN }}
-        run: |
-          set -eux
-          test -n "$FRP_V3_TOKEN"
-          # Keep the token out of .git/config: pass it as an extra header to
-          # this one command instead of embedding it in the remote URL.
-          basic="$(printf 'x-access-token:%s' "$FRP_V3_TOKEN" | base64 -w0)"
-          git -c "http.extraheader=AUTHORIZATION: basic ${basic}" \
-            clone --depth 1 --branch "${FRP_V3_VERSION}" \
-            "https://github.com/${FRP_V3_REPO}.git" src/frp-v3
-          ls -l src/frp-v3/src/cmd/frpc src/frp-v3/patches 2>/dev/null || true
-
-      - name: Choose the frpc source
+      # The fork's source is private and its README forbids putting the token
+      # anywhere but the deployment machine, so the client is NOT fetched at
+      # build time: payload/frpc-mipsel-v3 is vendored, and
+      # tools/fetch-frpc-v3.ps1 refreshes it from the release on a machine that
+      # holds the token. That is also unavoidable in another sense - the device
+      # fetches the payload anonymously, so this binary has to be public
+      # somewhere, and the alternatives are a CI secret (a token inside a public
+      # repository) or a private download host.
+      - name: Choose the frpc binary
         id: frp_src
-        env:
-          FRP_V3_TOKEN: ${{ secrets.FRP_V3_TOKEN }}
         run: |
           set -eux
-          if [ -f src/frp-v3/src/go.mod ]; then
-            echo "dir=src/frp-v3/src"                       >> "$GITHUB_OUTPUT"
-            echo "flavour=v3 (${FRP_V3_REPO}@${FRP_V3_VERSION})" >> "$GITHUB_OUTPUT"
-            echo "version=${FRP_V3_VERSION_UPSTREAM}-v3"    >> "$GITHUB_OUTPUT"
-            echo "using the frp v3 fork"
+          VENDORED=payload/frpc-mipsel-v3
+          if [ -f "$VENDORED" ]; then
+            want="$(awk 'NR==1 {print $1}' payload/frpc-mipsel-v3.sha256)"
+            got="$(sha256sum "$VENDORED" | awk '{print $1}')"
+            [ "$want" = "$got" ] || { echo "ERROR: vendored frpc sha256 mismatch ($want != $got)"; exit 1; }
+            file "$VENDORED" | grep -q 'MIPS' || { echo "ERROR: vendored frpc is not a MIPS binary"; exit 1; }
+            # The binary cannot be executed here, so the version stamp is the
+            # executable-free identity check.
+            strings -a "$VENDORED" | grep -q '0.71.0-v3' || { echo "ERROR: version stamp 0.71.0-v3 missing"; exit 1; }
+
+            # Does the build actually carry the fork's two hardening patches?
+            # As of v3.0.0 it does NOT, even though patches/frp-v3.patch in the
+            # fork documents both: its src/ tree still holds the upstream
+            # constants, and the release is compiled from that tree. Reported on
+            # every build rather than assumed - the client works either way, it
+            # is just not the hardened build.
+            if grep -a -q '/api/v1/stream' "$VENDORED"; then ws=patched; else ws=upstream; fi
+            if grep -a -q -P '\x46\x52\x50\x00\x02\x0d\x0a' "$VENDORED"; then magic=upstream; else magic=patched; fi
+            echo "frpc hardening: websocket-path=$ws wire-magic=$magic"
+            if [ "$ws" = upstream ] || [ "$magic" = upstream ]; then
+              echo "::warning title=frp v3 hardening not in this binary::vendored frpc has websocket-path=$ws wire-magic=$magic, so it does not carry the fork's documented patch (see payload/frpc-mipsel-v3.sha256 for provenance)."
+            fi
+
+            mkdir -p "${GITHUB_WORKSPACE}/dist/bin"
+            cp "$VENDORED" "${GITHUB_WORKSPACE}/dist/bin/frpc"
+            echo "flavour=v3 vendored, hardening: websocket-path=$ws wire-magic=$magic" >> "$GITHUB_OUTPUT"
+            echo "v3 vendored 0.71.0-v3 (hardening: websocket-path=$ws wire-magic=$magic)" > "${GITHUB_WORKSPACE}/dist/FRPC_FLAVOUR"
+            echo "vendored=yes" >> "$GITHUB_OUTPUT"
           else
-            echo "dir=src/frp"                              >> "$GITHUB_OUTPUT"
-            echo "flavour=upstream (fatedier/frp@${FRP_VERSION})" >> "$GITHUB_OUTPUT"
-            echo "version=${FRP_VERSION#v}"                 >> "$GITHUB_OUTPUT"
-            echo "::warning title=frp v3 fork not used::FRP_V3_TOKEN is missing (or the clone failed), so the payload carries upstream frpc ${FRP_VERSION}. Add the FRP_V3_TOKEN secret to build the frp v3 client."
+            echo "vendored=no" >> "$GITHUB_OUTPUT"
+            echo "::warning title=frp v3 client missing::payload/frpc-mipsel-v3 is absent, so the payload carries upstream frpc ${FRP_VERSION}. Run tools/fetch-frpc-v3.ps1 on a machine that can read the private fork."
           fi
 
       - name: Fetch frp source
-        if: steps.frp_src.outputs.dir == 'src/frp'
+        if: steps.frp_src.outputs.vendored != 'yes'
         uses: actions/checkout@v5
         with:
           repository: fatedier/frp
           ref: ${{ env.FRP_VERSION }}
           path: src/frp
 
-      - name: Build frpc
-        working-directory: ${{ steps.frp_src.outputs.dir }}
+      - name: Build frpc (upstream fallback)
+        if: steps.frp_src.outputs.vendored != 'yes'
+        working-directory: src/frp
         env:
           GOOS: linux
           GOARCH: mipsle
           GOMIPS: softfloat
           CGO_ENABLED: '0'
-          FRPC_VERSION: ${{ steps.frp_src.outputs.version }}
         run: |
           set -eux
           go build -trimpath -tags "frpc,noweb" \
-            -ldflags "-s -w -buildid= -X github.com/fatedier/frp/pkg/util/version.version=${FRPC_VERSION}" \
+            -ldflags "-s -w -buildid= -X github.com/fatedier/frp/pkg/util/version.version=${FRP_VERSION#v}" \
             -o "${GITHUB_WORKSPACE}/dist/bin/frpc" ./cmd/frpc
           mipsel-linux-gnu-strip --strip-unneeded "${GITHUB_WORKSPACE}/dist/bin/frpc" || true
-          echo "${{ steps.frp_src.outputs.flavour }}" > "${GITHUB_WORKSPACE}/dist/FRPC_FLAVOUR"
+          echo "upstream (fatedier/frp@${FRP_VERSION})" > "${GITHUB_WORKSPACE}/dist/FRPC_FLAVOUR"
           cat "${GITHUB_WORKSPACE}/dist/FRPC_FLAVOUR"
+
+      - name: Show which frpc the payload will carry
+        run: |
+          set -eux
+          echo "frpc flavour: ${{ steps.frp_src.outputs.flavour || 'upstream' }}"
+          ls -l "${GITHUB_WORKSPACE}/dist/bin/frpc"
+          sha256sum "${GITHUB_WORKSPACE}/dist/bin/frpc"
 
       - name: Fetch tailcat source
         uses: actions/checkout@v5
