@@ -169,6 +169,14 @@ at ~19-22 MB RSS and `frpc` ~13 MB.
   and the extracted payload (~37 MB) must coexist.
 * **in `menu.d`, `depends.acl` must be the array form** (`["name"]`). The
   object form makes the whole LuCI UI return HTTP 500.
+* **`form.Map.render()` is asynchronous** — in LuCI 25.x it returns a Promise
+  that resolves to the form element, not the element itself. Storing it
+  (`var formNode = m.render()`) and then handing it to `E([...])` reaches
+  `dom.create()`, matches none of its branches (a Promise is an object but has
+  no `nodeType`) and falls through to `html.charCodeAt(0)`, which throws
+  `TypeError: html.charCodeAt is not a function` and leaves the page blank.
+  Both custom pages shipped like that once; `tools/lint-views.js` now fails the
+  build on the pattern.
 
 ## Staying in control after a flash
 
@@ -214,6 +222,45 @@ reports `NO_DEVICE` and the station associates but never gets a lease), and
 adds it to the `wan` firewall zone so it provides the default route exactly
 like the Ethernet WAN. `off` restores the wired-WAN-only configuration.
 
+## Testing
+
+Two layers, both runnable from a checkout. The first is a CI gate; the second
+needs the router reachable on the LAN.
+
+```sh
+node tools/lint-views.js                  # static guards, no device needed
+node tools/webtest.js                     # whole UI, against 192.168.1.1
+node tools/webtest.js --apply             # ... plus the Save & Apply path
+node tools/webtest.js --shots shot/       # ... and screenshots
+```
+
+`tools/lint-views.js` encodes the bugs that already shipped once: a `render()`
+result reaching `E()`, the `menu.d` `depends.acl` object form, and CR bytes in
+anything copied to the device. It runs as the `lint` CI job, which every other
+job depends on. `sh -n` is run over every on-device script in the same job.
+
+`tools/webtest.js` is the end-to-end half, and it is the reason the render()
+bug was found: a syntax check, a jsdom shim and a `curl` of the page all pass
+while the page is completely blank. It logs into the router, loads both pages
+in headless Edge/Chrome over CDP, records every uncaught exception and console
+error, and asserts on the rendered DOM — the status table, the tailcat address,
+the generated client commands, the settings form and the footer's
+`Save & Apply` control. It also clicks `Show log` (a modal must open) and, with
+`--apply`, drives the whole save path: UCI committed, service restarted,
+success notification shown, address unchanged.
+
+It fails loudly on the broken code, which is what makes it worth running:
+
+```
+before the fix   FAIL  tailcat: view rendered without a JS error
+                       Uncaught (in promise) TypeError: html.charCodeAt is not a function
+                         at ClassConstructor.create (luci.js:111:14)
+                         at ClassConstructor.render (view/mt300n/tailcat.js:421:10)
+                 3/7 checks passed
+
+after the fix    28/28 checks passed
+```
+
 ## Flashing
 
 ```sh
@@ -227,7 +274,10 @@ model differs, so the old `/etc/config` is not reusable.
 ## Repository layout
 
 ```
-.github/workflows/build.yml   CI: payload build, image build, release
+.github/workflows/build.yml   CI: static checks, payload build, image build, release
+.gitattributes                forces LF everywhere (device scripts must not see CR)
+tools/lint-views.js           static guards, run as the lint CI job
+tools/webtest.js              headless-browser regression test (needs a live router)
 files/                        merged into the image (the FILES= argument)
   etc/config/{tailcat,frpc}     shipped configurations
   etc/init.d/{tailcat,frpc}     procd services (enabled at boot)
