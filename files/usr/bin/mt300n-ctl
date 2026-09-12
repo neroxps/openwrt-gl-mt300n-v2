@@ -109,6 +109,12 @@ frpc_status() {
 		_conf=1
 	fi
 	echo "installed=$(have frpc && echo 1 || echo 0)"
+	# Which client build is actually here: the frp v3 fork prints 0.71.0-v3, the
+	# upstream fallback prints its own version. The payload is re-fetched at
+	# every boot, so this is also how a fallback would become visible.
+	if have frpc; then
+		echo "version=$("$BIN/frpc" -v 2>/dev/null | head -1)"
+	fi
 	echo "enabled=$en"
 	echo "configured=$_conf"
 	echo "running=$(running "$RUNS_FRPC" && echo 1 || echo 0)"

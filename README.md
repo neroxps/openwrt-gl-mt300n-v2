@@ -99,6 +99,40 @@ Every proxy needs its own `[[proxies]]` line; `remotePort = 0` is legal and
 means "let the server choose", in which case the assigned port changes between
 connections (`frpc status -c /tmp/opt/etc/frpc.toml` prints what it got).
 
+#### Which frpc the device runs
+
+The payload carries the **frp v3 client** — `neroxps/frp-v3`, a private fork of
+frp v0.71.0 whose only two changes are the websocket path (`/~!frp` →
+`/api/v1/stream`) and the wire-protocol magic (the literal `FRP…` header → nine
+zero bytes). Upstream `frpc` over `tcp + tls` still works against it; `wss` does
+not, because that path must match on both ends.
+
+| | |
+| --- | --- |
+| Where it comes from | CI clones the private fork at `FRP_V3_VERSION` and cross-compiles it |
+| Secret it needs | `FRP_V3_TOKEN` — a token with **read** access to `neroxps/frp-v3` |
+| Without the secret | the job warns and falls back to upstream `FRP_VERSION`, and the payload says so |
+| How to see which one arrived | `mt300n-ctl frpc status` → `version=0.71.0-v3`; LuCI shows it next to *Installed*; `/tmp/opt/INSTALLED.txt` records it on the device; `MANIFEST.txt` and `FRPC_FLAVOUR` on the payload branch record it per build |
+
+The payload branch is **force-replaced** on every CI run, so nothing placed there
+by hand survives; the client has to come from the workflow.
+
+Runtime configuration notes for this client:
+
+* `transport.wireProtocol = "v2"` is what makes the patched magic matter. It is
+  set on the device and verified: the v2 login succeeds against the v3 `frps`,
+  while an upstream client cannot complete that handshake.
+* `transport.tls.disableCustomTLSFirstByte = true` avoids the non-standard
+  `0x17` first byte; `transport.tls.serverName` keeps a real SNI;
+  `transport.tls.trustedCaFile` pins the server CA (needs the `ca.crt` on the
+  device — not shipped).
+* `wss` needs the reverse proxy on **443** and only works where that port is
+  reachable. Measured from this uplink: 443 times out for both `tcp` and `wss`
+  while `5501` logs in, so the device uses `tcp + tls` on 5501.
+* From frp v0.68 on, proxy names are **no longer prefixed with `user`**: the
+  server sees `mt300n-ssh`, not `GL-MT300N-V2.mt300n-ssh`. Scripts that match
+  on the prefixed name have to be updated, or the prefix has to go into `name`.
+
 ## Environment
 
 `/etc/profile.d/20-mt300n-path.sh` puts `/tmp/opt/bin` on `PATH`, so after the

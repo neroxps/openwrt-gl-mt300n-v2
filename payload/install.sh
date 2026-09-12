@@ -227,6 +227,11 @@ fi
 	echo "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 	echo "repo=$REPO"
 	echo "proxy=$PROXY"
+	# Record which build of each program this device is actually running. The
+	# frpc line is the difference between the frp v3 fork (0.71.0-v3) and the
+	# upstream fallback, and it is what `mt300n-ctl frpc status` reports.
+	[ -x "$BIN/frpc" ]   && echo "frpc=$("$BIN/frpc" -v 2>/dev/null | head -1)"
+	[ -x "$BIN/tailcat" ] && echo "tailcat=$("$BIN/tailcat" version 2>/dev/null | head -1)"
 	ls -l "$BIN" 2>/dev/null
 } > "$DEST/INSTALLED.txt"
 

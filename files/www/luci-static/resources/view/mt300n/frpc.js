@@ -133,7 +133,13 @@ return view.extend({
 				]),
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left' }, [ _('Installed') ]),
-					E('td', { 'class': 'td left' }, [ badge(st.installed, _('yes'), _('no')) ])
+					E('td', { 'class': 'td left' }, [
+						badge(st.installed, _('yes'), _('no')),
+						/* The payload is re-fetched at every boot, so the version
+						 * is how a fallback from the frp v3 client to upstream
+						 * frpc would show up. */
+						st.version ? ' \u00b7 ' + st.version : ''
+					])
 				]),
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left' }, [ _('Enabled') ]),
