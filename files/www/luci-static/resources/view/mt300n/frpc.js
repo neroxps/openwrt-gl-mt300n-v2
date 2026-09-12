@@ -138,8 +138,6 @@ return view.extend({
 			uci.unset('frpc', section_id, 'config');
 		};
 
-		var formNode = m.render();
-
 		/* --------------------------------------------------------- actions */
 		var actions = E('div', { 'class': 'cbi-section' }, [
 			E('h3', [ _('Actions') ]),
@@ -177,7 +175,17 @@ return view.extend({
 			}, [ _('Show log') ])
 		]);
 
-		return E([ statusBox, formNode, actions ]);
+		/*
+		 * form.Map.render() returns a Promise that resolves to the form
+		 * element - not the element itself. Passing that Promise to E() lands
+		 * in dom.create(), where no branch matches (a Promise is an object but
+		 * has no nodeType) and it falls through to html.charCodeAt(), which
+		 * throws "html.charCodeAt is not a function" and blanks the page. So
+		 * the page is assembled once the form has actually been built.
+		 */
+		return m.render().then(function (formNode) {
+			return E([ statusBox, formNode, actions ]);
+		});
 	},
 
 	handleSaveApply: function (ev, mode) {

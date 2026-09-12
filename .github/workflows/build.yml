@@ -27,6 +27,28 @@ env:
   TAILCAT_REF: main
 
 jobs:
+  # ------------------------------------------------------------------ lint --
+  # Cheap static checks that each encode a bug which already shipped once.
+  # They gate every other job, so a broken web UI cannot reach a release.
+  lint:
+    name: static checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: LuCI view / menu.d / line-ending guards
+        run: node tools/lint-views.js
+
+      - name: Shell syntax of every on-device script
+        run: |
+          set -eux
+          find files -type f \
+            \( -path '*/usr/bin/*' -o -path '*/usr/sbin/*' \
+               -o -path '*/etc/init.d/*' -o -path '*/etc/uci-defaults/*' \
+               -o -path '*/etc/profile.d/*' \) -print0 |
+            xargs -0 -r -n1 sh -n
+          echo "shell syntax OK"
+
   # ---------------------------------------------------------------- payload --
   # Cross-compile the runtime payload for mipsel_24kc/softfloat.
   #
@@ -230,6 +252,7 @@ jobs:
   # Build the flashable sysupgrade image with the official ImageBuilder.
   image:
     name: build openwrt image
+    needs: [ lint ]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -279,6 +302,10 @@ jobs:
             -exec chmod 0755 {} +
           echo "--- staged files (mode) ---"
           find files -type f -exec ls -l {} \;
+          # Record the exact bytes of the custom web UI that go into this image,
+          # so a build log is enough to tell which revision was flashed.
+          echo "--- custom LuCI view scripts baked into this image ---"
+          ( cd files && sha256sum www/luci-static/resources/view/mt300n/*.js )
           # Optional: bake an SSH public key so the flashed router is reachable
           # even right after a `sysupgrade -n` (config reset).
           if [ -n "${{ secrets.SSH_AUTHORIZED_KEY }}" ]; then

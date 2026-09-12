@@ -1,0 +1,14 @@
+# This repository is edited from Windows as well as Linux, where core.autocrlf
+# would otherwise rewrite the working copy with CRLF. Everything under files/
+# is copied verbatim onto an OpenWrt device: a CR in a shell script makes it
+# fail with "not found", and a CR in authorized_keys makes the key unusable.
+# tools/lint-views.js enforces the same rule in CI.
+* text=auto eol=lf
+
+# Real binaries - never touched by the filters above.
+*.bin   binary
+*.gz    binary
+*.zst   binary
+*.png   binary
+*.jpg   binary
+*.webp  binary
