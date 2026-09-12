@@ -182,6 +182,7 @@ class PageSession {
 		this.consoleErrors = [];
 		this.logErrors = [];
 		this.netFailures = [];
+		this.moduleUrls = [];
 		this.mark = 0;
 
 		cdp.on((msg) => {
@@ -198,6 +199,16 @@ class PageSession {
 				this.logErrors.push(msg.params.entry.text + ' ' + (msg.params.entry.url || ''));
 			} else if (msg.method === 'Network.loadingFailed') {
 				this.netFailures.push(msg.params.errorText);
+			} else if (msg.method === 'Network.requestWillBeSent') {
+				/* LuCI builds its static-asset cache key as
+				 * "<luci revision>-<mtime of /lib/apk/db/installed>"
+				 * (runtime.uc -> template/header.ut -> luci.js reads the ?v=
+				 * back out of its own <script> tag). Recording the URLs the
+				 * browser actually requested is how we prove a stale copy of a
+				 * view script cannot be reused. */
+				const u = msg.params.request.url;
+				if (/\/luci-static\/resources\/view\/mt300n\/[\w-]+\.js/.test(u) && this.moduleUrls.indexOf(u) < 0)
+					this.moduleUrls.push(u);
 			}
 		});
 	}
@@ -409,7 +420,21 @@ async function testFrpc(page) {
 	console.log('\n--- Services / frpc ----------------------------------------------------');
 	page.mark = page.exceptions.length;
 
-	await page.goto(FRPC_PAGE);
+	/*
+	 * Reach the page the way a user does: from the previous page, by clicking
+	 * the sidebar entry. LuCI handles that client side (XHR + dom.content)
+	 * rather than doing a full page load, so it is a different code path from
+	 * opening the URL directly - and it is the one that matters in practice.
+	 */
+	const viaMenu = await page.evaluate(`(function () {
+		var a = Array.prototype.find.call(document.querySelectorAll('a[href]'), function (x) {
+			return /services\\/frpc$/.test(x.getAttribute('href') || '');
+		});
+		if (!a) return false;
+		a.click();
+		return true;
+	})()`);
+	check('frpc: reachable by clicking the sidebar entry', viaMenu);
 
 	const rendered = await page.waitFor("document.querySelector('#cbi-frpc')", 45000);
 	const problems = page.problemsSinceMark();
@@ -462,6 +487,58 @@ async function testFrpc(page) {
 		modalOk && page.problemsSinceMark().length === 0,
 		page.problemsSinceMark().join(' | '));
 
+	await page.evaluate(`(function () {
+		var b = Array.prototype.find.call(document.querySelectorAll('.modal button'), function (x) { return /Dismiss/.test(x.textContent); });
+		if (b) b.click();
+	})()`);
+	await sleep(400);
+
+	/* ---------------- the save path on this page, unwrapped ---------------- */
+	page.mark = page.exceptions.length;
+	const beforeToml = await page.evaluate("document.querySelector('#cbi-frpc textarea').value");
+	const applied = await page.evaluate(`(function () {
+		var el = document.querySelector('.cbi-page-actions .cbi-dropdown.cbi-button-apply');
+		if (!el) return null;
+		el.click();
+		return el.textContent.replace(/\\s+/g, ' ').trim();
+	})()`);
+	check('frpc: footer offers "Save & Apply"', applied != null, applied || '(missing)');
+
+	if (applied) {
+		let notice = '';
+		const deadline = Date.now() + 8000;
+		while (Date.now() < deadline && !notice) {
+			try {
+				notice = await page.evaluate(`(function () {
+					return Array.prototype.map.call(document.querySelectorAll('.alert-message'), function (m) {
+						return m.innerText.replace(/\\s+/g, ' ').trim();
+					}).filter(function (t) { return /Configuration applied|restarting failed/i.test(t); }).join(' || ');
+				})()`);
+			} catch (e) { /* reloading */ }
+			if (!notice) await sleep(200);
+		}
+		check('frpc: Save & Apply reports a successful restart',
+			/applied/i.test(notice) && !/failed/i.test(notice),
+			notice || '(our notification never appeared)');
+
+		await sleep(6000);
+		const afterToml = await page.evaluate(
+			"(function () { var t = document.querySelector('#cbi-frpc textarea'); return t ? t.value : null; })()");
+		check('frpc: the TOML survives a save-and-apply', afterToml === beforeToml,
+			afterToml === beforeToml ? 'unchanged'
+				: `before ${beforeToml ? beforeToml.length : '?'} chars, after ${afterToml ? afterToml.length : '?'} chars`);
+		check('frpc: Save & Apply raised no JS error',
+			page.problemsSinceMark().length === 0, page.problemsSinceMark().join(' | '));
+	}
+
+	/* ------- and a plain full page load, with no client-side navigation ----- */
+	page.mark = page.exceptions.length;
+	await page.goto(FRPC_PAGE);
+	const again = await page.waitFor("document.querySelector('#cbi-frpc textarea')", 45000);
+	check('frpc: also renders on a full page load (direct URL)',
+		again && page.problemsSinceMark().length === 0,
+		page.problemsSinceMark().join(' | '));
+
 	if (SHOTS)
 		console.log('      screenshot: ' + (await page.shot(path.join(SHOTS, 'frpc.png'))) + ' bytes');
 }
@@ -485,6 +562,20 @@ async function testMenu(page) {
 		}).filter(function (h) { return /services\\/(tailcat|frpc)/.test(h); });
 	})()`);
 	check('menu: sidebar links to both custom pages exist', links.length >= 2, links.join(' , '));
+
+	/* the cache key the shell advertises must be the one the modules were
+	 * fetched under, otherwise a browser can keep serving an old view script
+	 * after a fix has been deployed */
+	const buster = /luci\.js\?v=([^"']+)/.exec(html);
+	check('cache: the shell version-stamps luci.js', buster != null,
+		buster ? buster[1] : '(no ?v= on the luci.js script tag)');
+
+	if (buster) {
+		const stale = page.moduleUrls.filter(u => u.indexOf('?v=' + buster[1]) < 0);
+		check('cache: both view modules were fetched under the current cache key',
+			page.moduleUrls.length >= 2 && stale.length === 0,
+			stale.length ? 'stale copy: ' + stale.join(' , ') : page.moduleUrls.join(' , '));
+	}
 }
 
 /* ---------------------------------------------------------------------- main */

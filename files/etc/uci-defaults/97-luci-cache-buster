@@ -1,0 +1,29 @@
+#!/bin/sh
+#
+# Give this firmware a unique LuCI static-asset cache key.
+#
+# LuCI versions every JS module it loads with
+#
+#     ?v=<luci revision>-<mtime of /lib/apk/db/installed>
+#
+# (runtime.uc computes pkgs_update_time from that mtime, template/header.ut puts
+# it on the luci.js script tag, and luci.js reads the value back out of its own
+# script tag and reuses it for every L.require() call).
+#
+# ImageBuilder output is reproducible, so that mtime is a fixed constant. That
+# means the URL of view/mt300n/*.js does not change when the file changes, and a
+# browser that cached a broken revision keeps serving it even after the router
+# has been reflashed with a good one - the page stays broken while the device is
+# fine. Moving the mtime once, on the first boot of each freshly flashed image,
+# makes the key unique per flash and forces every client to re-fetch the web UI
+# exactly once.
+#
+# Touching the apk database is harmless: its mtime carries no meaning for apk,
+# and pkgs_update_time is used for nothing but this cache buster.
+#
+# tools/webtest.js asserts that the module URLs a browser actually fetches carry
+# the key the router currently advertises.
+
+touch /lib/apk/db/installed
+
+exit 0

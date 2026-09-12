@@ -167,6 +167,16 @@ at ~19-22 MB RSS and `frpc` ~13 MB.
   `http://127.0.0.1/derpmap.json`) with the project mirror as fallback.
 * **The installer needs ~50 MB free** because the downloaded archive (~12 MB)
   and the extracted payload (~37 MB) must coexist.
+* **A browser can keep serving a stale copy of a page you just fixed.** LuCI
+  versions every JS module URL as `?v=<luci revision>-<mtime of
+  /lib/apk/db/installed>` — `runtime.uc` computes that mtime, `header.ut` puts
+  it on the `luci.js` script tag, and `luci.js` reads it back out of its own tag
+  and reuses it for every `L.require()`. Image builds are reproducible, so the
+  key is a constant: replacing `view/mt300n/*.js` leaves its URL unchanged and
+  the browser may keep the old file, so the device is fixed while the page still
+  throws. `/etc/uci-defaults/97-luci-cache-buster` moves that mtime once per
+  flash, and `tools/webtest.js` asserts that the modules a browser fetches carry
+  the key the router advertises.
 * **in `menu.d`, `depends.acl` must be the array form** (`["name"]`). The
   object form makes the whole LuCI UI return HTTP 500.
 * **`form.Map.render()` is asynchronous** — in LuCI 25.x it returns a Promise
@@ -284,6 +294,7 @@ files/                        merged into the image (the FILES= argument)
   etc/init.d/{glstatus,mt300n-payload}
   etc/profile.d/20-mt300n-path.sh
   etc/uci-defaults/99-...       first-boot defaults
+  etc/uci-defaults/97-...       unique LuCI cache key per flash
   usr/bin/glstate               LED primitive
   usr/bin/glstatusd             LED state machine + debounced link probe
   usr/bin/mt300n-ctl            status/control helper (used by LuCI)
