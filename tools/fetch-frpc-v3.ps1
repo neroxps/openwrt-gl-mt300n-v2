@@ -14,7 +14,8 @@
 param(
     [string]$Tag   = 'v3.0.0',
     [string]$Repo  = 'neroxps/frp-v3',
-    [string]$Asset = 'frpc_v3_0.71.0-v3_linux_mipsle'
+    [string]$Asset = 'frpc_v3_0.71.0-v3_linux_mipsle',
+    [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
@@ -77,13 +78,24 @@ if (-not $versioned) { Remove-Item $tmp -Force; Write-Error 'no 0.71.0-v3 versio
 
 Write-Host ("websocket path patched : {0}" -f $wsPatched)
 Write-Host ("wire magic patched     : {0}" -f $magicPatched)
-if (-not $wsPatched -or -not $magicPatched) {
+if (-not $wsPatched) {
+    Remove-Item $tmp -Force
     Write-Host ''
-    Write-Host 'NOTE: this build does not carry both of the fork''s documented patches.'
-    Write-Host 'As of v3.0.0 the release is compiled from a src/ tree that still holds'
-    Write-Host 'the upstream constants (MagicV2 = "FRP\x00\x02\r\n", FrpWebsocketPath ='
-    Write-Host '"/~!frp"), so the artifact is upstream frp v0.71.0 with a -v3 version'
-    Write-Host 'stamp. Apply patches/frp-v3.patch inside src/ and re-release to fix it.'
+    Write-Host 'REFUSING TO VENDOR THIS ASSET: it speaks the upstream websocket path "/~!frp",'
+    Write-Host 'while the frps it has to talk to answers "/api/v1/stream" (the fork''s CI compiles'
+    Write-Host 'from a src/ tree that does not have patches/frp-v3.patch applied, which is why'
+    Write-Host 'its release assets are upstream frp v0.71.0 with a -v3 version stamp).'
+    Write-Host 'A client with the wrong path cannot log in: "connect to server error: bad status".'
+    Write-Host ''
+    Write-Host 'Fix the fork first: apply patches/frp-v3.patch inside src/, re-release, then'
+    Write-Host 'run this script against the new tag. Use -Force to vendor it anyway.'
+    if (-not $Force) { exit 1 }
+}
+if (-not $magicPatched) {
+    Write-Host ''
+    Write-Host 'NOTE: the wire-protocol magic is still the upstream "FRP\x00\x02\r\n". That is'
+    Write-Host 'harmless while transport.wireProtocol stays at v1 (the default); do not enable'
+    Write-Host 'v2 on the device until both the client and frps carry the zero magic.'
     Write-Host ''
 }
 

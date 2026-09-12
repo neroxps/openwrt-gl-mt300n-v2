@@ -1,0 +1,50 @@
+# Provenance of payload/frpc-mipsel-v3
+
+This is the frpc the device runs. It is **not** the asset published by
+`neroxps/frp-v3` releases, because that one cannot talk to the frp v3 server it
+belongs to - see "why" below. It is built here, from public upstream source plus
+the fork's two documented constants.
+
+    upstream   fatedier/frp v0.71.0 (tag v0.71.0, codeload tarball)
+    patch      neroxps/frp-v3 v3.0.0 patches/frp-v3.patch, both hunks:
+                 pkg/util/net/websocket.go   FrpWebsocketPath  "/~!frp" -> "/api/v1/stream"
+                 pkg/proto/wire/wire.go      MagicV2           "FRP\x00\x02\r\n" -> nine zero bytes
+    toolchain  go1.27.1 windows/amd64, CGO_ENABLED=0
+    build      GOOS=linux GOARCH=mipsle GOMIPS=softfloat
+               -buildvcs=false -tags "frpc,noweb" -trimpath
+               -ldflags "-s -w -X github.com/fatedier/frp/pkg/util/version.version=0.71.0-v3-patched"
+    sha256     fb4852dff74e4d28893175a6bfc0b5829193114e2dd4699d4e85ab419a62c3f6
+    size       17498303 bytes
+
+## Why not the release asset
+
+The fork's `src/` tree - the one its CI compiles and its releases are built from
+- still contains both upstream constants (checked through the API on 2026-09-12),
+and the released mipsle and amd64 assets confirm it (they contain `/~!frp` and no
+`/api/v1/stream`). The server side does not work that way: the deployed frps on
+the OMV *is* patched (a handshake to `10.89.1.3:7000/api/v1/stream` returns
+`101 Switching Protocols`, while `/~!frp` gets no websocket answer at all), and
+the Caddy front on 10443 routes `/api/v1/stream` only.
+
+So with the released client the device sends `/~!frp`, the front answers 404 and
+frpc reports `connect to server error: bad status`. Captured on the device by
+pointing frpc's plaintext websocket login at a listener: the request line is
+literally `GET /~!frp HTTP/1.1`.
+
+This build closes that gap. Verified against the real server: over
+`wss://home.neroxps.cn:10443` the login now reaches frps and is only rejected
+with `token in login doesn't match token from configuration` (the router carries
+the token of a different frps), i.e. transport, path, TLS, SNI and websocket
+upgrade are all correct.
+
+## How to replace it
+
+Preferred: apply `patches/frp-v3.patch` inside the fork's `src/`, re-release, and
+
+    tools/fetch-frpc-v3.ps1 -Tag <new tag>
+
+which verifies the asset and refuses an unpatched one. Or rebuild by hand with
+the flags above; `tools/scan-frpc-hardening.py` reports what a binary carries and
+`--require-patched` turns a missing hunk into a hard failure:
+
+    python3 tools/scan-frpc-hardening.py payload/frpc-mipsel-v3 --require-patched

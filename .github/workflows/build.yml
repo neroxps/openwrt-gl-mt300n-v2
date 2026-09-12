@@ -133,19 +133,25 @@ jobs:
             # executable-free identity check.
             strings -a "$VENDORED" | grep -q '0.71.0-v3' || { echo "ERROR: version stamp 0.71.0-v3 missing"; exit 1; }
 
-            # Does the build actually carry the fork's two hardening patches?
-            # As of v3.0.0 it does NOT, even though patches/frp-v3.patch in the
-            # fork documents both: its src/ tree still holds the upstream
-            # constants, and the release is compiled from that tree. Reported on
-            # every build rather than assumed - the client works either way, it
-            # is just not the hardened build. (Python, not grep: one of the two
-            # needles contains NUL bytes and grep stops matching at the first
-            # one, which reports "patched" for an unpatched binary.)
+            # Does the build carry the websocket path the server answers on?
+            # This is not optional: the deployed frps terminates
+            # /api/v1/stream and the Caddy front routes only that path, so a
+            # client speaking the upstream /~!frp cannot log in at all - it gets
+            # "connect to server error: bad status" (measured). The wire magic
+            # only matters for transport.wireProtocol = "v2", so that stays a
+            # warning. (Python, not grep: one needle contains NUL bytes and grep
+            # stops matching at the first one.)
             hardening="$(python3 tools/scan-frpc-hardening.py "$VENDORED" | tail -1)"
             echo "frpc hardening: $hardening"
             case "$hardening" in
-              *upstream*)
-                echo "::warning title=frp v3 hardening not in this binary::vendored frpc is $hardening, so it does not carry the fork's documented patch (provenance in payload/frpc-mipsel-v3.sha256). Rebuild the fork with patches/frp-v3.patch applied to src/ and run tools/fetch-frpc-v3.ps1."
+              *websocket-path=upstream*)
+                echo "::error title=frpc speaks the wrong websocket path::vendored frpc is $hardening, but the frps it talks to answers /api/v1/stream. Rebuild with patches/frp-v3.patch applied to src/, or run tools/fetch-frpc-v3.ps1 after the fork releases a patched build."
+                exit 1
+                ;;
+            esac
+            case "$hardening" in
+              *wire-magic=upstream*)
+                echo "::warning title=frp v3 wire magic not in this binary::$hardening - harmless while transport.wireProtocol stays at v1, but enable v2 only once both ends carry the patched magic."
                 ;;
             esac
 

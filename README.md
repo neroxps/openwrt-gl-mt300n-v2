@@ -101,59 +101,70 @@ connections (`frpc status -c /tmp/opt/etc/frpc.toml` prints what it got).
 
 #### Which frpc the device runs
 
-The payload carries `frpc` **0.71.0-v3** from `neroxps/frp-v3`, the private fork
-of frp v0.71.0 that is meant to change exactly two things: the websocket path
-(`/~!frp` → `/api/v1/stream`) and the wire-protocol magic (the literal `FRP…`
-header → nine zero bytes).
+The payload carries `frpc` **0.71.0-v3-patched**: frp v0.71.0 with the two
+constants from `neroxps/frp-v3`'s `patches/frp-v3.patch` applied — the websocket
+path (`/~!frp` → `/api/v1/stream`) and the wire-protocol magic (the literal
+`FRP…` header → nine zero bytes).
 
-**The v3.0.0 artifacts do not actually carry either change.** Measured on
-2026-09-12, not assumed:
+It is built here rather than taken from the fork's releases, because **those
+releases do not carry the patch**, while the deployment's server does. Measured
+on 2026-09-12, not assumed:
 
 | Check | Result |
 | --- | --- |
 | `src/pkg/util/net/websocket.go` in the fork | `FrpWebsocketPath = "/~!frp"` — the upstream value |
 | `src/pkg/proto/wire/wire.go` in the fork | `MagicV2 = "FRP\x00\x02\r\n"` — the upstream value |
-| `strings` on `…_linux_mipsle` and `…_linux_amd64` | `/~!frp` present, `/api/v1/stream` absent, upstream magic present |
-| `frpc_v3_0.71.0-v3_linux_mipsle -v` | `0.71.0-v3` |
+| the fork's released `…_linux_mipsle` / `…_linux_amd64` | `/~!frp` present, `/api/v1/stream` absent — upstream frp v0.71.0 with a `-v3` stamp |
+| the deployed `frps` (OMV, behind Caddy) | `101 Switching Protocols` for `/api/v1/stream`, **no** websocket answer for `/~!frp` |
+| the Caddy front on 10443 | routes `/api/v1/stream` to frps; `/~!frp` gets the decoy site's 404 |
+| the released client against that front | `connect to server error: bad status` |
 
-So the shipped client is upstream frp v0.71.0 with a `-v3` version stamp:
-`patches/frp-v3.patch` documents the intent, but it was never applied to the
-`src/` tree the fork's own CI compiles. The client still works over
-`tcp + tls`, and 0.71.0 is five releases newer than the 0.66.0 this payload used
-to carry — it includes the v0.68.1 `type = "http"` proxy-authentication bypass
-fix and the v0.71.0 `customDomains` validation fix — but the anti-detection
-hardening is not in the binary. `wss` against a *patched* `frps` would 404 on
-the path, and the `FRP` brand string is still on the wire. The payload job prints
-the hardening state of every vendored binary and raises a warning when it is
-missing, so this cannot go unnoticed.
+The client is the odd one out: the server side is patched, the released client
+is not, and the two only meet on `/api/v1/stream`. The failure is visible at the
+wire level — pointing the released client's plaintext websocket login at a
+listener shows it sending `GET /~!frp HTTP/1.1`.
+
+Provenance is recorded in `payload/frpc-mipsel-v3.provenance`: upstream v0.71.0,
+the fork's two hunks, `go1.27.1`, `GOOS=linux GOARCH=mipsle GOMIPS=softfloat`,
+`-tags "frpc,noweb"`, version stamped `0.71.0-v3-patched`.
 
 | | |
 | --- | --- |
 | Where it comes from | `payload/frpc-mipsel-v3`, vendored in this repository |
 | Why vendored | the payload branch is force-replaced on every CI run and the device downloads it anonymously, so the client must be committed somewhere public; the fork's own README also forbids putting its token anywhere but the deployment machine, which rules out a CI secret |
-| Updating it | `tools/fetch-frpc-v3.ps1 -Tag v3.0.1` on the deployment machine, then commit — the script verifies size and sha256 from the release API and reports the hardening state |
-| What CI checks | sha256 against `payload/frpc-mipsel-v3.sha256`, MIPS ELF, the `0.71.0-v3` stamp (hard failures); the two hardening markers (warning) |
-| How to see what arrived | `mt300n-ctl frpc status` → `version=0.71.0-v3`; LuCI next to *Installed*; `/tmp/opt/INSTALLED.txt`; `MANIFEST.txt` and `FRPC_FLAVOUR` on the payload branch |
+| Updating it | preferred: apply `patches/frp-v3.patch` inside the fork's `src/`, re-release, then `tools/fetch-frpc-v3.ps1 -Tag <tag>` — it verifies size and sha256 from the release API and **refuses** an asset whose websocket path is not patched. Or rebuild by hand with the flags above. |
+| What CI checks | sha256, MIPS ELF, the `0.71.0-v3` stamp, and `websocket-path=patched` — all hard failures, because the server answers `/api/v1/stream` only; the wire magic is a warning (it matters only for `transport.wireProtocol = "v2"`) |
+| How to see what arrived | `mt300n-ctl frpc status` → `version=0.71.0-v3-patched`; LuCI next to *Installed*; `/tmp/opt/INSTALLED.txt`; `MANIFEST.txt` and `FRPC_FLAVOUR` on the payload branch |
 
-If the fork is ever released with the patch actually applied, both ends have to
-move together: the vendored binary here and the `frps` that terminates the
-tunnel.
+Connecting to the OMV deployment, once its token is in place:
+
+```toml
+serverAddr = "home.neroxps.cn"
+serverPort = 10443            # Caddy; 443/8443 are filtered on this uplink
+transport.protocol = "wss"    # NOT "tcp": against Caddy that is "i/o deadline reached"
+transport.tls.enable = true
+transport.tls.serverName = "home.neroxps.cn"
+transport.tcpMux = true
+auth.token = "<token from /docker-data/frp-v3/frps.toml>"
+# remotePort must sit inside the server's allowPorts (26000-26999)
+```
 
 Runtime configuration notes for this client:
 
 * `transport.wireProtocol = "v2"` was tried on the device and then **removed**.
-  The wire layer compares the magic on read (`buf[i] != MagicV2[i]`), so with
-  both ends unpatched v2 buys nothing — the brand string is still sent — while
-  coupling the router to the server's build: rebuilding either end with the
-  patch makes v2 stop completing the handshake. `v1` is the default and ignores
-  the magic. Enable v2 only when both ends verifiably carry the patch.
+  The wire layer compares the magic on read (`buf[i] != MagicV2[i]`), so v2 only
+  pays off when *both* ends carry the zero magic, and it couples the router to
+  the server's build: rebuilding either end alone breaks the handshake. `v1` is
+  the default and ignores the magic; enable v2 only when both ends verifiably
+  carry the patch.
 * `transport.tls.disableCustomTLSFirstByte = true` avoids the non-standard
-  `0x17` first byte; `transport.tls.serverName` keeps a real SNI;
+  `0x17` first byte (tcp+tls path); `transport.tls.serverName` keeps a real SNI;
   `transport.tls.trustedCaFile` pins the server CA (needs the `ca.crt` on the
   device — not shipped).
-* `wss` needs the reverse proxy on **443** and only works where that port is
-  reachable. Measured from this uplink: 443 times out for both `tcp` and `wss`
-  while `5501` logs in, so the device uses `tcp + tls` on 5501.
+* The front ports are not interchangeable: from this uplink `443` and `8443`
+  time out while `10443` answers, so `wss` has to go to 10443. `5501` is a
+  different frps altogether — it takes the router's old token, answers no
+  websocket path, and is what the device used until the switch.
 * From frp v0.68 on, proxy names are **no longer prefixed with `user`**: the
   server sees `mt300n-ssh`, not `GL-MT300N-V2.mt300n-ssh`. Scripts that match
   on the prefixed name have to be updated, or the prefix has to go into `name`.
