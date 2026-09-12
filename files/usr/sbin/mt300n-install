@@ -24,6 +24,23 @@ rm -f "$ERR"
 
 log() { logger -t mt300n-install "$*"; echo "$*"; }
 
+# Is a usable payload already in place?
+#
+# /tmp/.mt300n-error has the highest priority in glstatusd, so it must only be
+# set when the device really has no working payload. A bootstrap fetch that
+# fails while the payload from an earlier run is intact (this uplink filters
+# github and the proxy on 443 much of the time) is not a device failure - and
+# if it painted the error state, the LED would stay wrong until the next
+# successful install.
+payload_usable() {
+	[ -x /tmp/opt/bin/tailcat ] || return 1
+	/tmp/opt/bin/tailcat version >/dev/null 2>&1 || return 1
+	if [ -x /tmp/opt/bin/frpc ]; then
+		/tmp/opt/bin/frpc -v >/dev/null 2>&1 || return 1
+	fi
+	return 0
+}
+
 # Cache buster.
 #
 # The GitHub proxies in front of raw.githubusercontent.com cache aggressively:
@@ -65,8 +82,12 @@ done
 
 if [ "$ok" != "1" ]; then
 	log "ERROR: cannot fetch the installer from $REPO@$REF"
-	touch "$ERR"
 	rm -f "$FLAG"
+	if payload_usable; then
+		log "the payload already installed is still usable - leaving the LED state alone"
+		exit 0
+	fi
+	touch "$ERR"
 	/usr/bin/glstate error
 	exit 1
 fi
@@ -81,6 +102,10 @@ rc=$?
 rm -f "$FLAG"
 if [ "$rc" -ne 0 ]; then
 	log "install failed (rc=$rc)"
+	if payload_usable; then
+		log "the payload from an earlier run is intact and usable - leaving the state alone"
+		exit 0
+	fi
 	touch "$ERR"
 	rm -f "$READY"
 	/usr/bin/glstate error
