@@ -1,0 +1,12 @@
+tailcat commit : 91dc4979bd4ae88af6ae2c8bb549616de4bcaa5a
+frpc flavour   : v3 vendored 0.71.0-v3 (hardening: websocket-path=patched wire-magic=patched)
+
+flavour default  (payload-mipsel_24kc.tar.gz): tailcat + frpc
+total 35996
+-rw-r--r-- 1 runner runner 17498303 Sep 12 07:28 frpc
+-rwxr-xr-x 1 runner runner 19505152 Sep 12 07:28 tailcat
+
+flavour optional (payload-tailscale-mipsel_24kc.tar.gz): tailscaled + tailscale CLI
+total 29728
+lrwxrwxrwx 1 runner runner       10 Sep 12 07:28 tailscale -> tailscaled
+-rwxr-xr-x 1 runner runner 30438464 Sep 12 07:28 tailscaled
