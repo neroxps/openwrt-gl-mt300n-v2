@@ -138,18 +138,21 @@ jobs:
             # fork documents both: its src/ tree still holds the upstream
             # constants, and the release is compiled from that tree. Reported on
             # every build rather than assumed - the client works either way, it
-            # is just not the hardened build.
-            if grep -a -q '/api/v1/stream' "$VENDORED"; then ws=patched; else ws=upstream; fi
-            if grep -a -q -P '\x46\x52\x50\x00\x02\x0d\x0a' "$VENDORED"; then magic=upstream; else magic=patched; fi
-            echo "frpc hardening: websocket-path=$ws wire-magic=$magic"
-            if [ "$ws" = upstream ] || [ "$magic" = upstream ]; then
-              echo "::warning title=frp v3 hardening not in this binary::vendored frpc has websocket-path=$ws wire-magic=$magic, so it does not carry the fork's documented patch (see payload/frpc-mipsel-v3.sha256 for provenance)."
-            fi
+            # is just not the hardened build. (Python, not grep: one of the two
+            # needles contains NUL bytes and grep stops matching at the first
+            # one, which reports "patched" for an unpatched binary.)
+            hardening="$(python3 tools/scan-frpc-hardening.py "$VENDORED" | tail -1)"
+            echo "frpc hardening: $hardening"
+            case "$hardening" in
+              *upstream*)
+                echo "::warning title=frp v3 hardening not in this binary::vendored frpc is $hardening, so it does not carry the fork's documented patch (provenance in payload/frpc-mipsel-v3.sha256). Rebuild the fork with patches/frp-v3.patch applied to src/ and run tools/fetch-frpc-v3.ps1."
+                ;;
+            esac
 
             mkdir -p "${GITHUB_WORKSPACE}/dist/bin"
             cp "$VENDORED" "${GITHUB_WORKSPACE}/dist/bin/frpc"
-            echo "flavour=v3 vendored, hardening: websocket-path=$ws wire-magic=$magic" >> "$GITHUB_OUTPUT"
-            echo "v3 vendored 0.71.0-v3 (hardening: websocket-path=$ws wire-magic=$magic)" > "${GITHUB_WORKSPACE}/dist/FRPC_FLAVOUR"
+            echo "flavour=v3 vendored, hardening: $hardening" >> "$GITHUB_OUTPUT"
+            echo "v3 vendored 0.71.0-v3 (hardening: $hardening)" > "${GITHUB_WORKSPACE}/dist/FRPC_FLAVOUR"
             echo "vendored=yes" >> "$GITHUB_OUTPUT"
           else
             echo "vendored=no" >> "$GITHUB_OUTPUT"
