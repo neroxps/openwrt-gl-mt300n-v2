@@ -283,10 +283,17 @@ jobs:
           #   kmod-tun                                               -> tailscaled userspace
           #   ca-bundle                                              -> HTTPS for GitHub
           #   luci                                                   -> web UI
+          #   kmod-nft-bridge -> bridge-family nftables: lets the AP mode
+          #                      filter distinguish the individual ports of
+          #                      br-lan, which the inet family cannot.  This is
+          #                      what keeps DHCP off the LAN port.
+          #   kmod-veth       -> used by tools/mt300n selftest to stand in for a
+          #                      wired client, so "no DHCP on the LAN port" can
+          #                      be proven on the device itself.
           # NOTE: zram-swap is deliberately NOT installed. The ramips/mt76x8
           # kernel is built without CONFIG_SWAP (/proc/swaps does not exist), so
           # zram cannot provide swap on this device - it would be dead weight.
-          PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci"
+          PKGS="kmod-wireguard wireguard-tools luci-proto-wireguard kmod-tun ca-bundle luci kmod-nft-bridge kmod-veth"
           mkdir -p files
           cp -a "$GITHUB_WORKSPACE/files/." files/
           # Single source of truth for the DERP map: payload/derpmap.json is

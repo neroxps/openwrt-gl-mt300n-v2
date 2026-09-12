@@ -1,0 +1,69 @@
+#!/bin/sh
+#
+# Read the hardware mode switch and print the mode it selects: "ap" or "router".
+#
+# Hardware
+# --------
+# Next to the reset button there is a 3-way toggle (GL.iNet fill the right-hand
+# third with a plastic post, so only two positions are reachable in practice).
+# It is wired to the two spare gpio-keys of this board:
+#
+#   BTN_0 -> DTS gpio 0  -> gpiochip512   (switch "left")
+#   BTN_1 -> DTS gpio 3  -> gpiochip515   (switch "right")
+#   reset -> DTS gpio 38 -> gpiochip550
+#
+# The switch pulls its selected pin high and leaves the other floating low, so:
+#
+#   centre position : both pins low      <- the position next to nothing
+#   one extreme     : exactly one pin high
+#
+# Measured on the device: with the switch AWAY from reset both pins read low,
+# i.e. that is the centre.  Away from reset = router mode, toward reset = AP
+# mode.  Because the centre is "both low", the rule below is simply "either pin
+# high means toward reset", which does not depend on knowing which of the two
+# pins the reachable extreme drives.
+#
+# The pins are claimed by the gpio-keys driver (OpenWrt's button-hotplug), and
+# they must stay claimed: that same driver owns the reset button.  The line
+# levels are therefore read from the gpiolib debugfs listing, which reports the
+# state of every requested line.  It is read-only and needs no extra packages.
+#
+# If debugfs is unavailable the function prints nothing and the caller falls
+# back to router mode, which is the safe direction (it is the mode the device
+# boots into today).
+
+GPIO_DEBUGFS=/sys/kernel/debug/gpio
+BTN_0_GPIO=512	# DTS &gpio 0
+BTN_1_GPIO=515	# DTS &gpio 3
+
+gpio_level() {
+	[ -r "$GPIO_DEBUGFS" ] || return 0
+	awk -v g="gpio-$1" '
+		$1 == g {
+			for (i = 1; i <= NF; i++)
+				if ($i == "hi" || $i == "lo") { print $i; exit }
+		}' "$GPIO_DEBUGFS"
+}
+
+mt300n_switch_ensure_debugfs() {
+	[ -r "$GPIO_DEBUGFS" ] && return 0
+	mount -t debugfs none /sys/kernel/debug 2>/dev/null
+	[ -r "$GPIO_DEBUGFS" ]
+}
+
+mt300n_mode_from_switch() {
+	local l0 l1
+	l0=$(gpio_level "$BTN_0_GPIO")
+	l1=$(gpio_level "$BTN_1_GPIO")
+
+	if [ "$l0" = hi ] || [ "$l1" = hi ]; then
+		echo ap
+	else
+		echo router
+	fi
+}
+
+# Only run the main body when executed, so the script can also be sourced.
+case "$0" in
+	*mt300n-mode-switch) mt300n_mode_from_switch ;;
+esac

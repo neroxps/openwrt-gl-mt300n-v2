@@ -98,6 +98,32 @@ frpc_status() {
 	_r=$(rss_kb "$RUNS_FRPC") && echo "rss_kb=$_r"
 }
 
+# --------------------------------------------------------------------- mode ---
+# Hardware mode switch state. mt300n-moded polls the switch and writes what it
+# read to /tmp/mt300n-switch; mt300n-mode-apply records the mode it applied in
+# /tmp/mt300n-mode.
+mode_status() {
+	local mode auto
+	mode=$(cat /tmp/mt300n-mode 2>/dev/null); [ -n "$mode" ] || mode=unknown
+	auto=$(uci -q get mt300n.main.auto); [ -n "$auto" ] || auto=1
+
+	echo "mode=$mode"
+	echo "auto=$auto"
+	echo "switch=$(sed -n 's/^mode=//p' /tmp/mt300n-switch 2>/dev/null)"
+	echo "btn0_gpio512=$(sed -n 's/^gpio512(BTN_0)=//p' /tmp/mt300n-switch 2>/dev/null)"
+	echo "btn1_gpio515=$(sed -n 's/^gpio515(BTN_1)=//p' /tmp/mt300n-switch 2>/dev/null)"
+	echo "ssid=$(uci -q get wireless.ap.ssid)"
+	echo "lan_proto=$(uci -q get network.lan.proto)"
+
+	if [ "$mode" = ap ]; then
+		echo "ap_state=$(cat /tmp/mt300n-ap.state 2>/dev/null)"
+		echo "ap_dhcp_pid=$(cat /tmp/mt300n-apdhcp.pid 2>/dev/null)"
+		echo "ap_dhcp_range=$(sed -n 's/^dhcp-range=//p' /var/etc/mt300n-ap-dhcp.conf 2>/dev/null)"
+		echo "lan_dhcp_blocked=$(nft list chain bridge mt300n input 2>/dev/null | grep -c 'iifname "eth0.1" udp dport 67')"
+		echo "bridge_ports=$(ls /sys/class/net/br-lan/brif 2>/dev/null | tr '\n' ' ')"
+	fi
+}
+
 # --------------------------------------------------------------------- main ---
 case "$1" in
 status)
@@ -106,6 +132,31 @@ status)
 	tailcat_status
 	echo "---"
 	frpc_status
+	echo "---"
+	mode_status
+	;;
+
+mode)
+	case "$2" in
+	set)
+		case "$3" in
+		router|ap) ;;
+		*) echo "usage: $0 mode set <router|ap> [auto|manual]" >&2; exit 2 ;;
+		esac
+		uci -q set mt300n.main.mode="$3"
+		[ "$4" = "auto" ] && uci -q set mt300n.main.auto='1' \
+				  || uci -q set mt300n.main.auto='0'
+		uci -q commit mt300n
+		/usr/bin/mt300n-mode-apply "$3"
+		;;
+	auto)
+		uci -q set mt300n.main.auto='1'
+		uci -q commit mt300n
+		echo "mode now follows the hardware switch"
+		;;
+	selftest) /usr/bin/mt300n-selftest ;;
+	*)        mode_status ;;
+	esac
 	;;
 
 payload)
@@ -188,6 +239,9 @@ usage: $0 <command>
   payload [status|install]    payload state / (re)install it
   frpc    {status|start|stop|restart|log [n]}
   tailcat {status|start|stop|restart|log [n]|address|genkey|ping}
+  mode    [status|set <router|ap> [auto|manual]|auto|selftest]
+                              hardware switch mode; selftest proves that DHCP
+                              is served to the wireless side only
 EOF
 	exit 1
 	;;

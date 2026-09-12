@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# Watch the hardware mode switch and apply the mode it selects.
+#
+# The switch is a physical thing, so the reading is debounced: two consecutive
+# identical samples (about 4 seconds) are required before a mode change is
+# applied.  That also makes the boot case work - the position present at boot is
+# applied once, a few seconds after the daemons come up.
+#
+# Debugging aid: set mt300n.main.auto=0 and mt300n.main.mode=<mode> to pin a mode
+# and ignore the switch entirely (used by the on-device tests).
+
+. /lib/functions.sh
+. /usr/bin/mt300n-mode-switch
+
+MODE_FILE=/tmp/mt300n-mode
+SWITCH_FILE=/tmp/mt300n-switch
+
+log() { logger -t mt300n-moded "$*"; }
+
+mt300n_switch_ensure_debugfs || log "debugfs unavailable - cannot read the switch, staying in router mode"
+
+read_mode() {
+	local auto manual
+	config_load mt300n
+	config_get auto main auto 1
+	config_get manual main mode router
+
+	if [ "$auto" = "0" ]; then
+		echo "$manual"
+		return
+	fi
+
+	mt300n_mode_from_switch
+}
+
+last=""
+cand=""
+count=0
+
+while true; do
+	cur=$(read_mode)
+
+	# publish the raw reading for diagnostics / the CLI
+	{
+		printf 'mode=%s\n' "$cur"
+		printf 'gpio512(BTN_0)=%s\n' "$(gpio_level 512)"
+		printf 'gpio515(BTN_1)=%s\n' "$(gpio_level 515)"
+		printf 'auto=%s\n' "$(uci -q get mt300n.main.auto)"
+	} > "$SWITCH_FILE" 2>/dev/null
+
+	if [ "$cur" = "$cand" ]; then
+		count=$((count + 1))
+	else
+		cand="$cur"
+		count=1
+	fi
+
+	if [ "$count" -ge 2 ] && [ "$cand" != "$last" ]; then
+		/usr/bin/mt300n-mode-apply "$cand"
+		last="$cand"
+	fi
+
+	sleep 2
+done

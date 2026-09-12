@@ -1,0 +1,138 @@
+#!/bin/sh
+#
+# Prove, on this device, that the AP-mode DHCP server cannot be reached from the
+# LAN port.
+#
+# The production rule drops DHCP arriving from the wired bridge port (eth0.1):
+#
+#     table bridge mt300n
+#       chain input  iifname "eth0.1" udp dport 67 counter drop
+#
+# That rule cannot be exercised from inside the router, because traffic the
+# router generates itself has no bridge port.  This test therefore builds two
+# throwaway bridge ports out of veth pairs - one standing in for the LAN port
+# (with the same drop rule attached) and one standing in for the wireless port -
+# and asks for a lease from each:
+#
+#     port with the drop rule      must NOT get a lease
+#     port without the drop rule   must     get a lease
+#
+# Together those two results show that the rule discriminates by bridge port, and
+# that a wireless client (which arrives on the wlan0 port, never on eth0.1) is
+# still served.
+#
+# The bridge family is the only place in the packet path where the individual
+# ports of a bridge are still visible; in the inet family both a wired and a
+# wireless client look identical, arriving on br-lan.
+#
+# Requires kmod-veth and kmod-nft-bridge, and AP mode to be active.
+
+BR=br-lan
+TABLE=mt300n
+DROP_PORT=vdrop0
+OK_PORT=vok0
+
+fail=0
+# busybox logger reads a leading "-" as an option, so keep messages from
+# starting with a dash
+log() { echo "$*"; logger -t mt300n-selftest "$*"; }
+
+cleanup() {
+	ip link del "$DROP_PORT" 2>/dev/null
+	ip link del "$OK_PORT" 2>/dev/null
+	# the temporary rule for the stand-in port; the eth0.1 rule stays
+	nft -a list chain bridge "$TABLE" input 2>/dev/null | \
+		awk '/iifname "vdrop0"/ { print $NF }' | \
+		while read -r h; do nft delete rule bridge "$TABLE" input handle "$h" 2>/dev/null; done
+	rm -f /tmp/mt300n-selftest.leases
+}
+trap 'cleanup; exit 1' INT TERM
+
+# --------------------------------------------------------------- preflight ---
+MODE=$(cat /tmp/mt300n-mode 2>/dev/null)
+if [ "$MODE" != ap ] && [ "$MODE" != router ]; then
+	log "SKIP: unknown mode '$MODE' - is mt300n-moded running?"
+	exit 2
+fi
+
+if [ "$MODE" = ap ] && ! nft list table bridge "$TABLE" >/dev/null 2>&1; then
+	log "SKIP: AP mode but the bridge filter table is not installed"
+	exit 2
+fi
+
+if [ "$MODE" = ap ]; then
+	if ! apdhcp_pid=$(cat /tmp/mt300n-apdhcp.pid 2>/dev/null) || ! kill -0 "$apdhcp_pid" 2>/dev/null; then
+		log "SKIP: the wifi DHCP server is not running (no upstream DHCP server on the bridge?)"
+		exit 2
+	fi
+fi
+
+# veth is a module (kmod-veth ships in this image); with no internet the
+# kmodloader resolves it from /lib/modules
+modprobe veth 2>/dev/null
+
+ip link add "$DROP_PORT" type veth peer name vdrop1 2>/dev/null || {
+	log "SKIP: cannot create veth (kmod-veth not loaded?)"; exit 2; }
+ip link add "$OK_PORT" type veth peer name vok1 2>/dev/null || {
+	log "SKIP: cannot create veth"; cleanup; exit 2; }
+
+# ------------------------------------------------------------------- setup ---
+ip link set "$DROP_PORT" master "$BR"
+ip link set "$OK_PORT"   master "$BR"
+for i in "$DROP_PORT" vdrop1 "$OK_PORT" vok1; do ip link set "$i" up; done
+sleep 1
+
+if [ "$MODE" = ap ]; then
+	log "stand-in LAN port : $DROP_PORT  (drop rule attached, like the real eth0.1)"
+	log "stand-in wifi port: $OK_PORT  (no drop rule, like the real wlan0)"
+
+	nft add rule bridge "$TABLE" input iifname "$DROP_PORT" udp dport 67 counter drop || {
+		log "FAIL: could not install the test rule"; cleanup; exit 1; }
+
+	# ---------------------------------------------------------- probes -------
+	log "== asking for a lease from the dropped port (must fail) =="
+	if udhcpc -i vdrop1 -n -q -t 2 -T 3 -V "" -s /bin/true -p /tmp/st1.pid >/dev/null 2>&1; then
+		log "FAIL: a client on the dropped port got a lease - the LAN port is NOT protected"
+		fail=1
+	else
+		log "ok: no lease on the dropped port (as required)"
+	fi
+
+	log "== asking for a lease from the served port (must succeed) =="
+	if udhcpc -i vok1 -n -q -t 3 -T 3 -s /bin/true -p /tmp/st2.pid >/dev/null 2>&1; then
+		log "ok: a lease was served on the non-dropped port"
+	else
+		log "FAIL: no lease on the non-dropped port - the wireless side would not be served either"
+		fail=1
+	fi
+
+	log "== bridge filter counters =="
+	nft list chain bridge "$TABLE" input 2>/dev/null
+else
+	# Router mode has no bridge filter at all: every port of the bridge is
+	# served, which is exactly the behaviour this firmware had before the
+	# mode switch existed.
+	log "stand-in bridge port: $DROP_PORT  (no filter in router mode)"
+
+	log "== router mode: a client on the bridge must get a lease =="
+	if udhcpc -i vdrop1 -n -q -t 3 -T 3 -s /bin/true -p /tmp/st1.pid >/dev/null 2>&1; then
+		log "ok: a lease was served on the bridge, as in the original configuration"
+	else
+		log "FAIL: router mode did not serve a client on the bridge"
+		fail=1
+	fi
+fi
+
+cleanup
+
+if [ "$fail" = 0 ]; then
+	if [ "$MODE" = ap ]; then
+		log "PASS: DHCP is served on a bridge port that is not the LAN port, and never on one that is"
+	else
+		log "PASS: router mode serves the bridge as before"
+	fi
+	exit 0
+fi
+
+log "FAIL"
+exit 1

@@ -73,6 +73,20 @@ fi
 # and, for frpc, until serverAddr has been configured.
 /etc/init.d/tailcat enable
 /etc/init.d/frpc enable
+# The mode switch: mt300n-moded reads the slide switch next to the reset button
+# and applies the mode it selects (router / ap a few seconds into every boot),
+# mt300n-apmode supervises AP mode.
+/etc/init.d/mt300n-mode enable
+
+# --- mode switch ------------------------------------------------------------
+# The switch is a 3-way toggle with its right-hand third blocked by a plastic
+# post, so only "centre" and one extreme are reachable.  Centre (both switch
+# pins low) is the position away from reset and means router mode, which is what
+# this image boots into; toward reset means AP mode.  See
+# /usr/bin/mt300n-mode-switch for the hardware details.
+#
+# Nothing to set up here: /etc/config/mt300n already ships the right defaults and
+# mt300n-moded applies the position it finds at boot.
 
 # NOTE: no swap is possible on this target - the ramips/mt76x8 kernel is built
 # without CONFIG_SWAP, so /proc/swaps does not exist and zram cannot help.

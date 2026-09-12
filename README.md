@@ -115,6 +115,124 @@ State priority is `error > installing > ready > online > offline`. The link
 probe is debounced (3 consecutive failures) so a single lost packet does not
 make the LED flicker.
 
+## Hardware mode switch
+
+Next to the reset button there is a slide switch. It is a **3-way toggle whose
+right-hand third is blocked by a plastic post from the factory**, so only two
+positions are reachable, and it selects the router's mode:
+
+| switch | /tmp/mt300n-switch | mode | wifi | WAN | DHCP |
+| --- | --- | --- | --- | --- | --- |
+| away from reset | both pins low (centre) | **router** | `NeroRoute` | dhcp client | for LAN **and** wifi, from OpenWrt's dnsmasq |
+| toward reset | one pin high | **ap** | `NeroAP` | unused | only for wifi, only when the bridge has no upstream DHCP server |
+
+Wifi key is `Aa89981166` in both modes. `mt300n-moded` reads the switch every two
+seconds (two identical samples required) and applies the mode, so it works at
+boot and while running. `mt300n-ctl mode` shows what it read; `mt300n-ctl mode
+set <router|ap>` pins a mode by hand and `mt300n-ctl mode auto` hands control
+back to the switch.
+
+### The hardware
+
+The switch is wired to the two spare keys of this board, which the device tree
+already declares and OpenWrt's button-hotplug driver owns:
+
+| dt node | dt gpio | gpiochip line | physical |
+| --- | --- | --- | --- |
+| `BTN_0` | `&gpio 0` | 512 | switch, "left" |
+| `BTN_1` | `&gpio 3` | 515 | switch, "right" (unreachable unless the plastic post is removed) |
+| `reset` | `&gpio 38` | 550 | reset button |
+
+The switch pulls its selected pin high and leaves the other low, so the centre
+position reads `lo` on both and an extreme reads `hi` on exactly one. Measured
+on the device with the switch away from reset: `lo`/`lo`, i.e. that position is
+the centre. Because the centre is "both low", the rule in
+`/usr/bin/mt300n-mode-switch` is simply *either pin high means toward reset*, so
+it does not depend on knowing which pin the reachable extreme drives.
+
+The pins stay owned by the button driver - that driver also owns the reset
+button, and unbinding it would cost us factory-reset-by-button - so the levels
+are read from the gpiolib debugfs listing, which reports the state of every
+requested line and needs no extra packages.
+
+Note the device tree declares both pins `GPIO_ACTIVE_LOW` although the hardware
+drives them high, so the button *events* for `BTN_0`/`BTN_1` are inverted. That
+is harmless: this firmware reads the raw line levels instead, and nothing acts on
+those two keys.
+
+### AP mode, and keeping DHCP off the LAN port
+
+In AP mode the LAN port and the wifi are **one bridge** (`br-lan` = `eth0.1` +
+`wlan0`), which is what the mode is for: plug the LAN port into whatever is
+there and the wireless clients are on that same segment. Two things then have to
+be right, and both are enforced rather than assumed:
+
+* **The wired port never gets DHCP from this router.** Both the wired and the
+  wireless client arrive on `br-lan`, so nothing in the `inet` family can tell
+  them apart - but the `bridge` family still sees the individual ports. AP mode
+  therefore installs
+
+  ```
+  table bridge mt300n
+    chain input  iifname "eth0.1" udp dport 67 counter drop
+  ```
+
+  and this is the only reason `kmod-nft-bridge` is in the image. A wireless
+  client arrives on the `wlan0` port and is unaffected.
+
+* **DHCP is only served when the bridge carries no upstream DHCP server.** With
+  an upstream present this router stays silent and takes its own address from
+  it, so it remains reachable inside that network; with none it serves the
+  wireless side from a separate dnsmasq instance (`/var/etc/mt300n-ap-dhcp.conf`,
+  DHCP only, `port=0`) while OpenWrt's dnsmasq keeps doing DNS. OpenWrt's own
+  instance cannot be scoped to a bridge port, hence the second one.
+
+  Detection is active rather than passive - it does not depend on somebody else
+  asking for a lease. The router sends its own DISCOVER carrying the vendor
+  class `MTPROBE`, and the DHCP server it runs ignores that class, so a reply
+  can only have come from somebody else. `mt300n-apmode` requires two consecutive
+  successful probes before switching, and three consecutive missed ones before
+  switching back.
+
+AP mode therefore looks like this:
+
+| bridge has an upstream DHCP server | br-lan address | our DHCP |
+| --- | --- | --- |
+| yes | dhcp client (stays reachable in that network) | off |
+| no | `192.168.1.1/24` | on, wireless clients only |
+
+Caveats worth knowing:
+
+* In AP mode the **WAN port is not used** - the LAN port is the uplink. It is
+  set to `proto none` so it cannot add a stray default route.
+* A **wired** client gets no address from this router in AP mode, by design. If
+  the wired side has no DHCP server either, give that device a static address in
+  `192.168.1.0/24` to reach the router.
+* The middle LED keeps its existing meaning (blinking = no internet), so in AP
+  mode with no uplink it blinks.
+
+### Testing it
+
+```sh
+mt300n-ctl mode                      # what the switch reads, and what was applied
+mt300n-ctl mode selftest             # proves the DHCP scoping for the current mode
+```
+
+`mt300n-selftest` builds throwaway `veth` bridge ports - one standing in for the
+LAN port with the production drop rule attached, one for the wireless port -
+and asks both for a lease. In AP mode the dropped port must get nothing and the
+other must get a lease; in router mode the bridge must be served as before. That
+is the only way to exercise the rule from inside the router, because traffic the
+router generates itself has no bridge port. On hardware it reports:
+
+```
+iifname "eth0.1" udp dport 67 counter packets 3 bytes 1053 drop
+PASS: DHCP is served on a bridge port that is not the LAN port, and never on one that is
+```
+
+where that `eth0.1` counter counts real requests from the wired side being
+dropped.
+
 ## Why the payload is not flashed
 
 `tailcat` + `frpc` are Go programs. Stripped they are still ~37 MB, which does
@@ -290,7 +408,9 @@ tools/lint-views.js           static guards, run as the lint CI job
 tools/webtest.js              headless-browser regression test (needs a live router)
 files/                        merged into the image (the FILES= argument)
   etc/config/{tailcat,frpc}     shipped configurations
+  etc/config/mt300n             mode switch, SSIDs, AP-mode DHCP range
   etc/init.d/{tailcat,frpc}     procd services (enabled at boot)
+  etc/init.d/mt300n-mode        the mode switch: mt300n-moded + mt300n-apmode
   etc/init.d/{glstatus,mt300n-payload}
   etc/profile.d/20-mt300n-path.sh
   etc/uci-defaults/99-...       first-boot defaults
@@ -298,6 +418,11 @@ files/                        merged into the image (the FILES= argument)
   usr/bin/glstate               LED primitive
   usr/bin/glstatusd             LED state machine + debounced link probe
   usr/bin/mt300n-ctl            status/control helper (used by LuCI)
+  usr/bin/mt300n-mode-switch    read the hardware switch -> router|ap
+  usr/bin/mt300n-moded          follow the switch, apply the mode
+  usr/bin/mt300n-mode-apply     declarative "make it this mode"
+  usr/bin/mt300n-apmode         AP mode: upstream detection, wifi-only DHCP
+  usr/bin/mt300n-selftest       prove the DHCP scoping on the device
   usr/bin/mt300n-tailcat-run    builds tailcat's argv from UCI and execs it
   usr/bin/mt300n-frpc-run       writes frpc.toml from UCI and execs frpc
   usr/sbin/mt300n-install       fetch install.sh + packages.txt, then run it

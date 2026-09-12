@@ -1,0 +1,162 @@
+#!/bin/sh
+#
+# Apply one of the two hardware-switch modes.  Usage:
+#
+#     mt300n-mode-apply router     (switch away from reset)
+#     mt300n-mode-apply ap         (switch toward reset)
+#
+# router mode - unchanged from the stock behaviour of this firmware:
+#     WAN        dhcp client
+#     br-lan     eth0.1 (LAN port) + wlan0, static 192.168.1.1/24
+#     wifi       SSID NeroRoute
+#     DHCP       OpenWrt's dnsmasq serves br-lan, i.e. LAN and wifi alike
+#
+# ap mode - the LAN port and the wifi are one bridge, and the router only hands
+# out addresses to the wireless side:
+#     br-lan     eth0.1 (LAN port) + wlan0, one bridge, as requested
+#     WAN        unused (proto none)
+#     wifi       SSID NeroAP
+#     DHCP       only when the bridge carries no upstream DHCP server, and even
+#                then only for wireless clients: an nftables rule in the bridge
+#                family drops DHCP arriving from the LAN port, so a wired client
+#                can never get a lease from this router.  The address is served
+#                by a dedicated dnsmasq instance (see mt300n-apmode), because
+#                OpenWrt's own instance cannot be scoped to a bridge port.
+#     address    from the upstream DHCP server when there is one (so the router
+#                stays reachable in that network), otherwise 192.168.1.1/24
+#
+# The mode is declarative: this script rewrites UCI and reloads the affected
+# services, and running it twice changes nothing.
+
+. /lib/functions.sh
+
+MODE="$1"
+case "$MODE" in
+	ap|router) ;;
+	*) echo "usage: $0 <router|ap>" >&2; exit 2 ;;
+esac
+
+CFG=mt300n
+LANPORT=eth0.1
+NFT_TABLE=mt300n
+
+cfg_get() {
+	local v
+	config_load "$CFG"
+	config_get v main "$1" "$2"
+	echo "$v"
+}
+
+SSID_ROUTER=$(cfg_get router_ssid NeroRoute)
+SSID_AP=$(cfg_get ap_ssid NeroAP)
+KEY=$(cfg_get key Aa89981166)
+AP_IPADDR=$(cfg_get ap_ipaddr 192.168.1.1/24)
+
+log() { logger -t mt300n-mode "$*"; echo "$*"; }
+
+# --------------------------------------------------------------- wireless ---
+if [ "$MODE" = ap ]; then SSID="$SSID_AP"; else SSID="$SSID_ROUTER"; fi
+
+uci -q delete wireless.default_radio0
+uci -q set wireless.ap=wifi-iface
+uci -q set wireless.ap.device='radio0'
+uci -q set wireless.ap.mode='ap'
+uci -q set wireless.ap.network='lan'
+uci -q set wireless.ap.ifname='wlan0'
+uci -q set wireless.ap.encryption='psk2'
+uci -q set wireless.ap.key="$KEY"
+uci -q set wireless.ap.ssid="$SSID"
+uci -q set wireless.ap.disabled='0'
+uci -q commit wireless
+
+# ---------------------------------------------------------------- network ---
+if [ "$MODE" = router ]; then
+	uci -q set network.lan.proto='static'
+	uci -q set network.lan.ipaddr='192.168.1.1/24'
+	uci -q set network.lan.ip6assign='60'
+	uci -q delete network.lan.vendorid
+	uci -q set network.wan.proto='dhcp'
+	uci -q set network.wan6.proto='dhcpv6'
+else
+	# The WAN port is not part of the AP-mode picture; the LAN port is the
+	# uplink.  Leaving a dhcp client on it would only add a stray default
+	# route, so it is disabled.
+	uci -q set network.wan.proto='none'
+	uci -q set network.wan6.proto='none'
+	uci -q delete network.lan.ip6assign
+	# Every DHCP request this router makes on the bridge carries this vendor
+	# class, and our own DHCP server ignores that class.  Without it the
+	# upstream probe below would be answered by ourselves.
+	uci -q set network.lan.vendorid='MTPROBE'
+	# Start from the standalone arrangement - local address, our own DHCP on.
+	# mt300n-apmode switches this to a dhcp client if it finds an upstream
+	# server on the bridge, and back again if that upstream disappears.
+	uci -q set network.lan.proto='static'
+	uci -q set network.lan.ipaddr="$AP_IPADDR"
+fi
+uci -q commit network
+
+# ------------------------------------------------------------------- dhcp ---
+if [ "$MODE" = router ]; then
+	uci -q set dhcp.lan.ignore='0'
+	uci -q set dhcp.lan.dhcpv4='server'
+	uci -q set dhcp.lan.start='100'
+	uci -q set dhcp.lan.limit='150'
+	uci -q set dhcp.lan.leasetime='12h'
+	uci -q set dhcp.lan.ra='server'
+	uci -q set dhcp.lan.dhcpv6='server'
+else
+	# OpenWrt's dnsmasq keeps serving DNS; it no longer serves DHCP on the
+	# bridge, because DHCP for the wireless side is handled by the dedicated
+	# instance that mt300n-apmode manages.
+	uci -q set dhcp.lan.ignore='1'
+	uci -q set dhcp.lan.ra='disabled'
+	uci -q set dhcp.lan.dhcpv6='disabled'
+fi
+uci -q commit dhcp
+
+# ----------------------------------------------------------- bridge filter ---
+# In AP mode, drop DHCP requests that arrive from the LAN port before they can
+# reach any local DHCP server.  The bridge family sees the individual ports, so
+# this distinguishes the wired port from the wireless one; nothing in the inet
+# family can, because both arrive on br-lan.
+nft_apply() {
+	command -v nft >/dev/null 2>&1 || { log "nft not available - LAN port not filtered"; return 1; }
+
+	nft delete table bridge "$NFT_TABLE" 2>/dev/null
+
+	[ "$MODE" = ap ] || return 0
+
+	# the bridge family lives in its own module; with no internet the kmodloader
+	# pulls it from /lib/modules (kmod-nft-bridge is part of this image)
+	modprobe nft_bridge 2>/dev/null
+
+	nft add table bridge "$NFT_TABLE" || return 1
+	nft add chain bridge "$NFT_TABLE" input \
+		'{ type filter hook input priority 0; policy accept; }' || return 1
+	nft add rule bridge "$NFT_TABLE" input \
+		iifname "$LANPORT" udp dport 67 counter drop || return 1
+
+	log "lan port $LANPORT: DHCP requests dropped (wifi-only DHCP)"
+	return 0
+}
+
+# ------------------------------------------------------------------ reload ---
+# Leaving AP mode: the wifi-only DHCP instance must go, otherwise it would race
+# OpenWrt's own DHCP server on the same bridge for the few seconds it takes the
+# supervisor to notice the mode change.
+if [ "$MODE" = router ] && [ -f /tmp/mt300n-apdhcp.pid ]; then
+	kill "$(cat /tmp/mt300n-apdhcp.pid 2>/dev/null)" 2>/dev/null
+	rm -f /tmp/mt300n-apdhcp.pid
+fi
+
+/etc/init.d/network reload >/dev/null 2>&1
+ifdown wan 2>/dev/null; [ "$MODE" = router ] && ifup wan 2>/dev/null
+wifi reload >/dev/null 2>&1 || wifi up >/dev/null 2>&1
+/etc/init.d/dnsmasq restart >/dev/null 2>&1
+/etc/init.d/odhcpd restart >/dev/null 2>&1
+fw4 reload >/dev/null 2>&1
+nft_apply
+
+echo "$MODE" > /tmp/mt300n-mode
+log "mode=$MODE ssid=$SSID"

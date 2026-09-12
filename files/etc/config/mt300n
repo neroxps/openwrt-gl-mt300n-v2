@@ -1,0 +1,18 @@
+config mt300n 'main'
+	# Which mode the router should be in.
+	#   auto=1 -> follow the hardware switch next to the reset button
+	#   auto=0 -> use the `mode` value below and ignore the switch
+	option auto '1'
+	option mode 'router'
+
+	# WiFi. One SSID per mode, same key.
+	option ap_ssid 'NeroAP'
+	option router_ssid 'NeroRoute'
+	option key 'Aa89981166'
+
+	# AP mode: address handed to wireless clients when there is no upstream
+	# DHCP server on the bridge.
+	option ap_ipaddr '192.168.1.1/24'
+	option ap_start '100'
+	option ap_limit '150'
+	option ap_leasetime '12h'
