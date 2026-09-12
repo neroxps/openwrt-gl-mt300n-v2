@@ -468,6 +468,13 @@ async function testFrpc(page) {
 	check('frpc: status table is present', info.rows >= 4, info.rows + ' rows');
 	check('frpc: status shows the service state', /running|stopped/.test(info.statusText),
 		JSON.stringify(info.statusText.slice(0, 80)));
+	/* The page runs "frpc verify" through mt300n-ctl frpc check and shows the
+	 * verdict, so a TOML that frpc would refuse is visible before starting it.
+	 * A router with the binary not installed yet legitimately shows the
+	 * "cannot check" wording instead. */
+	check('frpc: status reports whether frpc accepts the configuration',
+		/frpc verify|valid|rejected|cannot check/i.test(info.statusText),
+		JSON.stringify(info.statusText.slice(0, 120)));
 	check('frpc: the whole frpc.toml is editable in one text area',
 		info.hasTextarea && info.textareaRows >= 20 && info.textareaLen > 0,
 		`textarea rows=${info.textareaRows} len=${info.textareaLen}`);
@@ -496,6 +503,13 @@ async function testFrpc(page) {
 	/* ---------------- the save path on this page, unwrapped ---------------- */
 	page.mark = page.exceptions.length;
 	const beforeToml = await page.evaluate("document.querySelector('#cbi-frpc textarea').value");
+	/*
+	 * Stamp the document that is about to be saved. The page reloads itself a
+	 * few seconds after saving, and waiting for the stamp to disappear is how
+	 * the comparison below is made against the *reloaded* page rather than the
+	 * one that is still sitting in the DOM.
+	 */
+	await page.evaluate("document.documentElement.setAttribute('data-webtest-before-save', '1')");
 	const applied = await page.evaluate(`(function () {
 		var el = document.querySelector('.cbi-page-actions .cbi-dropdown.cbi-button-apply');
 		if (!el) return null;
@@ -505,28 +519,47 @@ async function testFrpc(page) {
 	check('frpc: footer offers "Save & Apply"', applied != null, applied || '(missing)');
 
 	if (applied) {
+		/*
+		 * The page runs "frpc verify" before restarting and words its
+		 * notification accordingly, so the expected wording follows what it
+		 * reported in the status table above. That is how the rejection branch
+		 * gets asserted as well - pointed at a router whose stored TOML frpc
+		 * refuses, this check expects the error, not a cheerful "restarted".
+		 */
+		const expectsValid = !/rejected by frpc/i.test(info.statusText);
+
 		let notice = '';
-		const deadline = Date.now() + 8000;
+		const deadline = Date.now() + 10000;
 		while (Date.now() < deadline && !notice) {
 			try {
 				notice = await page.evaluate(`(function () {
 					return Array.prototype.map.call(document.querySelectorAll('.alert-message'), function (m) {
 						return m.innerText.replace(/\\s+/g, ' ').trim();
-					}).filter(function (t) { return /Configuration applied|restarting failed/i.test(t); }).join(' || ');
+					}).filter(function (t) { return /Configuration (applied|saved)|restarting failed/i.test(t); }).join(' || ');
 				})()`);
 			} catch (e) { /* reloading */ }
 			if (!notice) await sleep(200);
 		}
-		check('frpc: Save & Apply reports a successful restart',
-			/applied/i.test(notice) && !/failed/i.test(notice),
-			notice || '(our notification never appeared)');
 
-		await sleep(6000);
-		const afterToml = await page.evaluate(
-			"(function () { var t = document.querySelector('#cbi-frpc textarea'); return t ? t.value : null; })()");
-		check('frpc: the TOML survives a save-and-apply', afterToml === beforeToml,
-			afterToml === beforeToml ? 'unchanged'
-				: `before ${beforeToml ? beforeToml.length : '?'} chars, after ${afterToml ? afterToml.length : '?'} chars`);
+		if (expectsValid) {
+			check('frpc: Save & Apply reports a successful restart',
+				/applied/i.test(notice) && !/rejected|failed/i.test(notice),
+				notice || '(our notification never appeared)');
+		} else {
+			check('frpc: Save & Apply reports the rejected configuration instead of claiming success',
+				/rejected it/i.test(notice) && !/applied/i.test(notice),
+				notice || '(our notification never appeared)');
+		}
+
+		const reloaded = await page.waitFor(
+			"!document.documentElement.hasAttribute('data-webtest-before-save')", 45000);
+		const backAgain = await page.waitFor("document.querySelector('#cbi-frpc textarea')", 45000);
+		const afterToml = backAgain ? await page.evaluate(
+			"(function () { var t = document.querySelector('#cbi-frpc textarea'); return t ? t.value : null; })()") : null;
+		check('frpc: the TOML survives a save-and-apply',
+			afterToml != null && afterToml === beforeToml,
+			(afterToml === beforeToml ? 'unchanged' : `before ${beforeToml ? beforeToml.length : '?'} chars, after ${afterToml ? afterToml.length : '?'} chars`)
+				+ (reloaded ? ', read back after the page reloaded itself' : ', NOTE: the page never reloaded'));
 		check('frpc: Save & Apply raised no JS error',
 			page.problemsSinceMark().length === 0, page.problemsSinceMark().join(' | '));
 	}

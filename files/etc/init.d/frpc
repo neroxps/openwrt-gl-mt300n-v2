@@ -18,11 +18,15 @@ start_service() {
 	}
 
 	# Validate the configuration before handing it to procd, so an
-	# unconfigured frpc does not sit in a respawn loop.
+	# unconfigured - or broken - frpc does not sit in a respawn loop.
+	# mt300n-frpc-run --check runs "frpc verify" itself and logs the reason,
+	# including a hint when frpc answers with its unhelpful YAML fallback
+	# message instead of the real TOML error.
 	/usr/bin/mt300n-frpc-run --check >/dev/null 2>&1
 	case "$?" in
 		0) : ;;
 		2) logger -t frpc "not configured - not starting"; return 0 ;;
+		3) logger -t frpc "configuration rejected - not starting (see the frpc log)"; return 0 ;;
 		*) logger -t frpc "payload not ready - not starting"; return 0 ;;
 	esac
 

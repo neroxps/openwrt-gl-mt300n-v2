@@ -1,18 +1,20 @@
 #!/bin/sh
-# Write the frpc TOML configuration from UCI, then exec frpc.
+# Write the frpc TOML configuration from UCI, check it, then exec frpc.
 #
 # The TOML text is stored in the `config` option of /etc/config/frpc so that
 # LuCI can edit it directly and it survives a reboot (the binary lives in
 # tmpfs, but the configuration does not have to).
 #
 # Usage:
-#   mt300n-frpc-run            write the config and exec frpc
-#   mt300n-frpc-run --check    only validate; do not exec
+#   mt300n-frpc-run            write the config, verify it, exec frpc
+#   mt300n-frpc-run --check    validate everything; do not exec
+#   mt300n-frpc-run --verify   print "ok", or frpc's verdict on the stored config
 #
-# Exit codes (both modes):
-#   0  ready to run (or, with --check, ready to be started)
+# Exit codes:
+#   0  ready to run (--check: ready to be started; --verify: config accepted)
 #   1  frpc is not installed yet
 #   2  not configured / disabled - nothing to start
+#   3  frpc rejected the configuration
 
 . /lib/functions.sh
 
@@ -20,38 +22,85 @@ BIN=/tmp/opt/bin/frpc
 CONFDIR=/tmp/opt/etc
 CONF="$CONFDIR/frpc.toml"
 
-CHECK=0
-[ "$1" = "--check" ] && CHECK=1
+MODE=run
+case "$1" in
+	--check)  MODE=check ;;
+	--verify) MODE=verify ;;
+esac
 
 log() { logger -t frpc "$*"; }
 
-[ -x "$BIN" ] || { [ "$CHECK" = 1 ] || log "frpc is not installed yet"; exit 1; }
+[ -x "$BIN" ] || { [ "$MODE" = run ] && log "frpc is not installed yet"; exit 1; }
 
 config_load frpc
 config_get      cfg     main config ''
 config_get_bool enabled main enabled 0
 
 if [ -z "$cfg" ]; then
-	[ "$CHECK" = 1 ] || log "no configuration stored in /etc/config/frpc"
+	[ "$MODE" = run ] && log "no configuration stored in /etc/config/frpc"
 	exit 2
 fi
 
 # Nothing to connect to yet? Then do not start, and do not spam the log with an
 # endlessly retrying client.
 if ! printf '%s\n' "$cfg" | grep -qE '^[[:space:]]*serverAddr[[:space:]]*=[[:space:]]*"[^"]+"'; then
-	[ "$CHECK" = 1 ] || log "serverAddr is empty in /etc/config/frpc - not starting"
+	[ "$MODE" = run ] && log "serverAddr is empty in /etc/config/frpc - not starting"
 	exit 2
 fi
 
 if [ "$enabled" != "1" ]; then
-	[ "$CHECK" = 1 ] || log "frpc is disabled in /etc/config/frpc"
+	[ "$MODE" = run ] && log "frpc is disabled in /etc/config/frpc"
 	exit 2
 fi
 
-[ "$CHECK" = 1 ] && exit 0
+# ---------------------------------------------------------------- checking ---
+#
+# frpc 0.66 answers a TOML syntax error with the message its YAML fallback
+# produces for the whole file:
+#
+#   json: cannot unmarshal string into Go value of type v1.ClientConfig
+#
+# which says nothing at all about the actual mistake. Reproduced on the device:
+# a file containing nothing but "hello world" produces that very same line, and
+# so does a proxy block that lost its "[[proxies]]" header. So when that
+# message shows up, print what it is hiding.
+hint_for() {
+	case "$1" in
+		*"cannot unmarshal string into Go value of type v1.ClientConfig"*)
+			echo "frpc hid the real error behind its YAML fallback: the usual cause is a proxy block without its own [[proxies]] line, or the same key set twice inside one table"
+			;;
+	esac
+}
 
-mkdir -p "$CONFDIR"
-printf '%s\n' "$cfg" > "$CONF"
+write_conf() {
+	mkdir -p "$(dirname "$1")"
+	printf '%s\n' "$cfg" > "$1"
+}
 
+# Verify a scratch copy, so a rejected configuration never replaces the file the
+# running instance was started with.
+SCRATCH="$CONFDIR/frpc.toml.verify"
+write_conf "$SCRATCH"
+VERIFY_OUT="$("$BIN" verify -c "$SCRATCH" 2>&1)"
+RC=$?
+rm -f "$SCRATCH"
+
+if [ "$RC" != 0 ]; then
+	HINT="$(hint_for "$VERIFY_OUT")"
+	if [ "$MODE" = verify ]; then
+		printf '%s\n' "$VERIFY_OUT" >&2
+		[ -n "$HINT" ] && printf '%s\n' "$HINT" >&2
+	else
+		log "configuration rejected by frpc: $VERIFY_OUT"
+		[ -n "$HINT" ] && log "$HINT"
+	fi
+	exit 3
+fi
+
+[ "$MODE" = verify ] && { echo ok; exit 0; }
+[ "$MODE" = check ]  && exit 0
+
+# ------------------------------------------------------------------ running ---
+write_conf "$CONF"
 log "starting frpc with $CONF"
 exec "$BIN" -c "$CONF"

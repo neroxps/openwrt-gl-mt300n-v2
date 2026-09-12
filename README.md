@@ -66,6 +66,39 @@ The text is stored in UCI (so it survives a reboot) and written to
 `/tmp/opt/etc/frpc.toml` when the service starts. Save & Apply restarts frpc.
 It stays idle until `serverAddr` is filled in and enabled.
 
+#### The configuration is verified before frpc is started
+
+`mt300n-frpc-run` writes the TOML to a scratch file and runs **frpc's own
+`verify`** on it first. A rejected configuration is logged and the service
+simply does not start, instead of procd respawning a client that can never come
+up (`Instance frpc::instance1 s in a crash loop 6 crashes`).
+
+This matters because frpc 0.66 answers a TOML syntax error with the message its
+YAML fallback produces for the whole file:
+
+```
+json: cannot unmarshal string into Go value of type v1.ClientConfig
+```
+
+which says nothing about the real mistake. Measured on the device: a file
+containing nothing but `hello world` produces that very same line, and so does
+a proxy block that lost its `[[proxies]]` header — in TOML the keys after a
+`[[proxies]]` header belong to that array's last element, so `name`, `localIP`,
+`localPort` and `remotePort` then collide with the ones already defined there,
+and the file no longer parses. So when that message appears, the runner adds
+what it hides.
+
+| Where | What |
+| --- | --- |
+| `mt300n-ctl frpc check` | `ok=1`, or `ok=0` + `code=` + `error=` + `hint=` |
+| `mt300n-ctl frpc status` | includes `ok=`/`error=` for the stored TOML |
+| LuCI → Services → frpc | a **Configuration** row: *valid*, *rejected by frpc* with the message and the hint, or *cannot check* while the payload is not installed |
+| Save & Apply | reports **"frpc rejected it"** with the message instead of claiming the service restarted |
+
+Every proxy needs its own `[[proxies]]` line; `remotePort = 0` is legal and
+means "let the server choose", in which case the assigned port changes between
+connections (`frpc status -c /tmp/opt/etc/frpc.toml` prints what it got).
+
 ## Environment
 
 `/etc/profile.d/20-mt300n-path.sh` puts `/tmp/opt/bin` on `PATH`, so after the
@@ -424,7 +457,7 @@ files/                        merged into the image (the FILES= argument)
   usr/bin/mt300n-apmode         AP mode: upstream detection, wifi-only DHCP
   usr/bin/mt300n-selftest       prove the DHCP scoping on the device
   usr/bin/mt300n-tailcat-run    builds tailcat's argv from UCI and execs it
-  usr/bin/mt300n-frpc-run       writes frpc.toml from UCI and execs frpc
+  usr/bin/mt300n-frpc-run       verifies the TOML, writes it from UCI, execs frpc
   usr/sbin/mt300n-install       fetch install.sh + packages.txt, then run it
   usr/sbin/mt300n-autorun       poll for internet, then install
   usr/sbin/mt300n-wifi-uplink   temporary STA uplink helper

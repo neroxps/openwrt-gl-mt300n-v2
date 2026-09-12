@@ -7,7 +7,7 @@
 #
 #   mt300n-ctl status
 #   mt300n-ctl payload [status|install]
-#   mt300n-ctl frpc    [status|start|stop|restart|log [n]]
+#   mt300n-ctl frpc    [status|check|start|stop|restart|log [n]]
 #   mt300n-ctl tailcat [status|start|stop|restart|log [n]|address|genkey|ping]
 
 BIN=/tmp/opt/bin
@@ -80,6 +80,24 @@ tailcat_log() { logread 2>/dev/null | grep -iE 'tailcat' | tail -n "${1:-40}"; }
 frpc_log()    { logread 2>/dev/null | grep -iE 'frpc'    | tail -n "${1:-40}"; }
 
 # ---------------------------------------------------------------------- frpc --
+# frpc's own "verify" subcommand on the stored configuration. frpc answers a
+# TOML syntax error with its YAML fallback message ("json: cannot unmarshal
+# string into Go value of type v1.ClientConfig"), which hides the real problem,
+# so the runner appends a hint on the second line. Both lines are reported.
+frpc_check() {
+	_out="$(/usr/bin/mt300n-frpc-run --verify 2>&1)"
+	_rc=$?
+	if [ "$_rc" = 0 ]; then
+		echo "ok=1"
+		echo "code=0"
+	else
+		echo "ok=0"
+		echo "code=$_rc"
+		printf '%s\n' "$_out" | sed -n '1p' | sed 's/^/error=/'
+		printf '%s\n' "$_out" | sed -n '2p' | sed 's/^/hint=/'
+	fi
+}
+
 frpc_status() {
 	. /lib/functions.sh
 	config_load frpc
@@ -96,6 +114,12 @@ frpc_status() {
 	echo "running=$(running "$RUNS_FRPC" && echo 1 || echo 0)"
 	echo "pid=$(pgrep -f "$RUNS_FRPC" 2>/dev/null | head -1)"
 	_r=$(rss_kb "$RUNS_FRPC") && echo "rss_kb=$_r"
+	# Only meaningful once the binary is there; frpc does the parsing.
+	if have frpc && [ "$_conf" = 1 ]; then
+		_chk="$(frpc_check)"
+		echo "$_chk" | sed -n '1p'
+		echo "$_chk" | sed -n '3p'   # error=... line, when there is one
+	fi
 }
 
 # --------------------------------------------------------------------- mode ---
@@ -223,11 +247,12 @@ tailcat)
 frpc)
 	case "$2" in
 	status)  frpc_status ;;
+	check)   frpc_check ;;
 	start)   /etc/init.d/frpc start ;;
 	stop)    /etc/init.d/frpc stop ;;
 	restart) /etc/init.d/frpc restart ;;
 	log)     frpc_log "$3" ;;
-	*) echo "usage: $0 frpc {status|start|stop|restart|log [n]}" ;;
+	*) echo "usage: $0 frpc {status|check|start|stop|restart|log [n]}" ;;
 	esac
 	;;
 
@@ -237,7 +262,8 @@ usage: $0 <command>
 
   status                      everything at a glance
   payload [status|install]    payload state / (re)install it
-  frpc    {status|start|stop|restart|log [n]}
+  frpc    {status|check|start|stop|restart|log [n]}
+                              check runs frpc's own verify on the stored TOML
   tailcat {status|start|stop|restart|log [n]|address|genkey|ping}
   mode    [status|set <router|ap> [auto|manual]|auto|selftest]
                               hardware switch mode; selftest proves that DHCP
